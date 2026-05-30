@@ -1,0 +1,30 @@
+{
+  "name": "passman_ts_rs",
+  "version": "1.0.0",
+  "description": "Password manager in Typescript frontend and Rust backend",
+  "author": "Isaac Steadman",
+  "license": "MIT",
+  "dependencies": {
+    "less": "^4.4.2",
+    "parcel": "^2.16.3",
+    "passman_crypto": "file:passman_crypto/pkg",
+    "typescript": "^5.9.3"
+  },
+  "targets": {
+    "default": {
+      "context": "browser"
+    }
+  },
+  "scripts": {
+    "build:wasm": "wasm-pack build passman_crypto --target web --out-dir pkg",
+    "prebuild": "npm run build:wasm",
+    "prestart": "npm run build:wasm",
+    "build": "npx parcel build frontend/index.html",
+    "start": "npx parcel serve frontend/index.html",
+    "test": "playwright test"
+  },
+  "devDependencies": {
+    "@parcel/transformer-less": "^2.16.3",
+    "@playwright/test": "^1.50.0"
+  }
+}

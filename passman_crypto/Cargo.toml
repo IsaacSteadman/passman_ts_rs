@@ -1,0 +1,20 @@
+[package]
+name = "passman_crypto"
+version = "0.1.0"
+edition = "2024"
+
+# cdylib is required for wasm-bindgen output; rlib keeps the crate usable as a
+# normal Rust dependency in the server binary.
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+anyhow = "1.0.100"
+argon2 = "0.5.3"
+chacha20poly1305 = "0.10"
+wasm-bindgen = "0.2"
+
+# getrandom 0.2 with "js" routes entropy through window.crypto.getRandomValues()
+# for the wasm32 target (pulled in transitively by argon2 via rand_core 0.6).
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.2", features = ["js"] }

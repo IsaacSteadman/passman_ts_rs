@@ -1,0 +1,673 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <title>Firaxite Password Manager</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="stylesheet" type="text/css" media="screen" href="main.less" />
+    <script type="module" src="main.ts"></script>
+  </head>
+  <body>
+    <!-- ═══════════════════════════════════════════════════════════
+         AUTH PHASE  (login · register · server settings)
+         Hidden as a whole once the user logs in.
+         ═══════════════════════════════════════════════════════════ -->
+    <div class="pm-auth-wrap">
+      <div class="pm-auth-card">
+        <!-- Brand header -->
+        <div class="pm-auth-brand">
+          <svg
+            xmlns="http://www.w3.org/2000/svg"
+            fill="none"
+            viewBox="0 0 24 24"
+            stroke-width="1.5"
+            stroke="currentColor"
+            aria-hidden="true"
+          >
+            <path
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              d="M16.5 10.5V6.75a4.5 4.5 0 1 0-9 0v3.75m-.75 11.25h10.5a2.25 2.25 0 0 0
+                     2.25-2.25v-6.75a2.25 2.25 0 0 0-2.25-2.25H6.75a2.25 2.25 0 0 0-2.25
+                     2.25v6.75a2.25 2.25 0 0 0 2.25 2.25Z"
+            />
+          </svg>
+          <h1>Passman</h1>
+        </div>
+
+        <!-- Error / status messages shared by login + register handlers -->
+        <p id="error-panel"></p>
+
+        <!-- ── LOGIN ─────────────────────────────────────────────── -->
+        <!--onsubmit blocked by method="dialog" so passwords can't leak if JS fails-->
+        <div id="login">
+          <nav class="pm-auth-tabs">
+            <span class="pm-auth-tab pm-auth-tab--active">Login</span>
+            <a
+              class="pm-auth-tab"
+              href="#"
+              onclick="
+                document.getElementById('login').style.display = 'none';
+                document.getElementById('register').style.display = '';
+                return false;
+              "
+            >
+              Register
+            </a>
+          </nav>
+          <form method="dialog">
+            <div class="pm-form-field">
+              <label for="login-username">Username</label>
+              <input
+                type="text"
+                name="username"
+                id="login-username"
+                autocomplete="username"
+              />
+            </div>
+            <div class="pm-form-field">
+              <label for="login-password">Password</label>
+              <div class="pm-pass-field">
+                <input
+                  type="password"
+                  name="password"
+                  id="login-password"
+                  autocomplete="current-password"
+                />
+                <label class="pm-show-toggle" title="Show / hide password">
+                  <input type="checkbox" name="show-password" />
+                  <svg
+                    class="pm-eye-open"
+                    xmlns="http://www.w3.org/2000/svg"
+                    fill="none"
+                    viewBox="0 0 24 24"
+                    stroke-width="1.5"
+                    stroke="currentColor"
+                    aria-hidden="true"
+                  >
+                    <path
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                      d="M2.036 12.322a1.012 1.012 0 0 1 0-.639C3.423 7.51 7.36 4.5 12 4.5c4.638 0
+                             8.573 3.007 9.963 7.178.07.207.07.431 0 .639C20.577 16.49 16.64 19.5 12
+                             19.5c-4.638 0-8.573-3.007-9.963-7.178Z"
+                    />
+                    <path
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                      d="M15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z"
+                    />
+                  </svg>
+                  <svg
+                    class="pm-eye-closed"
+                    xmlns="http://www.w3.org/2000/svg"
+                    fill="none"
+                    viewBox="0 0 24 24"
+                    stroke-width="1.5"
+                    stroke="currentColor"
+                    aria-hidden="true"
+                  >
+                    <path
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                      d="M3.98 8.223A10.477 10.477 0 0 0 1.934 12C3.226 16.338 7.244 19.5 12
+                             19.5c.993 0 1.953-.138 2.863-.395M6.228 6.228A10.451 10.451 0 0 1 12
+                             4.5c4.756 0 8.773 3.162 10.065 7.498a10.522 10.522 0 0 1-4.293
+                             5.774M6.228 6.228 3 3m3.228 3.228 3.65 3.65m7.894 7.894L21
+                             21m-3.228-3.228-3.65-3.65m0 0a3 3 0 1 0-4.243-4.243m4.242 4.242L9.88 9.88"
+                    />
+                  </svg>
+                </label>
+              </div>
+            </div>
+            <input
+              type="submit"
+              name="submit"
+              value="Login"
+              class="pm-auth-submit"
+            />
+          </form>
+        </div>
+
+        <!-- ── REGISTER ──────────────────────────────────────────── -->
+        <div id="register" style="display: none">
+          <nav class="pm-auth-tabs">
+            <a
+              class="pm-auth-tab"
+              href="#"
+              onclick="
+                document.getElementById('register').style.display = 'none';
+                document.getElementById('login').style.display = '';
+                return false;
+              "
+            >
+              Login
+            </a>
+            <span class="pm-auth-tab pm-auth-tab--active">Register</span>
+          </nav>
+          <form method="dialog">
+            <div class="pm-form-field">
+              <label for="reg-username">Username</label>
+              <input
+                type="text"
+                name="username"
+                id="reg-username"
+                autocomplete="username"
+              />
+              <p
+                class="pm-field-hint username-validity-message"
+                style="display: none"
+              >
+                Username may only contain letters, numbers, "_", ".", "$", or
+                "-" and must start with a letter or a number.
+              </p>
+            </div>
+            <div class="pm-form-field">
+              <label for="reg-new-pass">Password</label>
+              <div class="pm-pass-field">
+                <input
+                  type="password"
+                  name="new_pass"
+                  id="reg-new-pass"
+                  autocomplete="new-password"
+                />
+                <label class="pm-show-toggle" title="Show / hide password">
+                  <input type="checkbox" name="show-new-pass" />
+                  <svg
+                    class="pm-eye-open"
+                    xmlns="http://www.w3.org/2000/svg"
+                    fill="none"
+                    viewBox="0 0 24 24"
+                    stroke-width="1.5"
+                    stroke="currentColor"
+                    aria-hidden="true"
+                  >
+                    <path
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                      d="M2.036 12.322a1.012 1.012 0 0 1 0-.639C3.423 7.51 7.36 4.5 12 4.5c4.638 0
+                             8.573 3.007 9.963 7.178.07.207.07.431 0 .639C20.577 16.49 16.64 19.5 12
+                             19.5c-4.638 0-8.573-3.007-9.963-7.178Z"
+                    />
+                    <path
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                      d="M15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z"
+                    />
+                  </svg>
+                  <svg
+                    class="pm-eye-closed"
+                    xmlns="http://www.w3.org/2000/svg"
+                    fill="none"
+                    viewBox="0 0 24 24"
+                    stroke-width="1.5"
+                    stroke="currentColor"
+                    aria-hidden="true"
+                  >
+                    <path
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                      d="M3.98 8.223A10.477 10.477 0 0 0 1.934 12C3.226 16.338 7.244 19.5 12
+                             19.5c.993 0 1.953-.138 2.863-.395M6.228 6.228A10.451 10.451 0 0 1 12
+                             4.5c4.756 0 8.773 3.162 10.065 7.498a10.522 10.522 0 0 1-4.293
+                             5.774M6.228 6.228 3 3m3.228 3.228 3.65 3.65m7.894 7.894L21
+                             21m-3.228-3.228-3.65-3.65m0 0a3 3 0 1 0-4.243-4.243m4.242 4.242L9.88 9.88"
+                    />
+                  </svg>
+                </label>
+              </div>
+            </div>
+            <div class="pm-form-field">
+              <label for="reg-confirm-pass">Confirm Password</label>
+              <div class="pm-pass-field">
+                <input
+                  type="password"
+                  name="confirm_new_pass"
+                  id="reg-confirm-pass"
+                  autocomplete="new-password"
+                />
+              </div>
+            </div>
+            <input
+              type="submit"
+              name="submit"
+              value="Create Account"
+              class="pm-auth-submit"
+            />
+          </form>
+        </div>
+
+        <!-- ── SERVER SETTINGS (collapsed) ──────────────────────── -->
+        <details class="pm-server-settings">
+          <summary>Server Settings</summary>
+          <div class="pm-server-settings-body">
+            <form id="server-access" method="dialog">
+              <div class="pm-form-field">
+                <label for="server-ns-inp">Namespace</label>
+                <input type="text" name="server_ns" id="server-ns-inp" />
+              </div>
+              <div class="pm-form-field">
+                <label for="server-pass-inp">Server Password</label>
+                <div class="pm-pass-field">
+                  <input
+                    type="password"
+                    name="server_pass"
+                    id="server-pass-inp"
+                  />
+                  <label class="pm-show-toggle" title="Show / hide password">
+                    <input
+                      type="checkbox"
+                      name="show-server-pass"
+                      onchange="
+                        document.getElementById('server-pass-inp').type = this
+                          .checked
+                          ? 'text'
+                          : 'password'
+                      "
+                    />
+                    <svg
+                      class="pm-eye-open"
+                      xmlns="http://www.w3.org/2000/svg"
+                      fill="none"
+                      viewBox="0 0 24 24"
+                      stroke-width="1.5"
+                      stroke="currentColor"
+                      aria-hidden="true"
+                    >
+                      <path
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                        d="M2.036 12.322a1.012 1.012 0 0 1 0-.639C3.423 7.51 7.36 4.5 12 4.5c4.638 0
+                               8.573 3.007 9.963 7.178.07.207.07.431 0 .639C20.577 16.49 16.64 19.5 12
+                               19.5c-4.638 0-8.573-3.007-9.963-7.178Z"
+                      />
+                      <path
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                        d="M15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z"
+                      />
+                    </svg>
+                    <svg
+                      class="pm-eye-closed"
+                      xmlns="http://www.w3.org/2000/svg"
+                      fill="none"
+                      viewBox="0 0 24 24"
+                      stroke-width="1.5"
+                      stroke="currentColor"
+                      aria-hidden="true"
+                    >
+                      <path
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                        d="M3.98 8.223A10.477 10.477 0 0 0 1.934 12C3.226 16.338 7.244 19.5 12
+                               19.5c.993 0 1.953-.138 2.863-.395M6.228 6.228A10.451 10.451 0 0 1 12
+                               4.5c4.756 0 8.773 3.162 10.065 7.498a10.522 10.522 0 0 1-4.293
+                               5.774M6.228 6.228 3 3m3.228 3.228 3.65 3.65m7.894 7.894L21
+                               21m-3.228-3.228-3.65-3.65m0 0a3 3 0 1 0-4.243-4.243m4.242 4.242L9.88 9.88"
+                      />
+                    </svg>
+                  </label>
+                </div>
+              </div>
+            </form>
+          </div>
+        </details>
+      </div>
+    </div>
+
+    <!-- ═══════════════════════════════════════════════════════════
+         CONTENT PHASE  (shown after login, hidden until then)
+         ═══════════════════════════════════════════════════════════ -->
+    <div id="content" style="display: none">
+      <!-- Sticky app bar -->
+      <div class="pm-app-bar">
+        <div class="pm-app-bar-brand">
+          <svg
+            xmlns="http://www.w3.org/2000/svg"
+            fill="none"
+            viewBox="0 0 24 24"
+            stroke-width="1.5"
+            stroke="currentColor"
+            aria-hidden="true"
+          >
+            <path
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              d="M16.5 10.5V6.75a4.5 4.5 0 1 0-9 0v3.75m-.75 11.25h10.5a2.25 2.25 0 0 0
+                     2.25-2.25v-6.75a2.25 2.25 0 0 0-2.25-2.25H6.75a2.25 2.25 0 0 0-2.25
+                     2.25v6.75a2.25 2.25 0 0 0 2.25 2.25Z"
+            />
+          </svg>
+          <span>Passman</span>
+        </div>
+        <span name="stat-span" class="pm-app-bar-status"></span>
+        <div class="pm-app-bar-actions">
+          <button name="history" class="pm-btn pm-btn-ghost">History</button>
+          <button name="save" class="pm-btn pm-btn-primary">Save</button>
+          <button name="logout" class="pm-btn pm-btn-ghost">Logout</button>
+        </div>
+      </div>
+
+      <!-- Scrollable page body, max-width constrained -->
+      <div class="pm-page-wrap">
+        <!-- Password tables injected here by contentArea.ts -->
+        <div name="data"></div>
+
+        <!-- Password generator (moved inside #content so it only shows when logged in) -->
+        <p class="pm-section-label">Password Generator</p>
+        <div id="passgen-panel">
+          <form method="dialog">
+            <!-- Length -->
+            <div class="pg-section">
+              <div class="pg-section-title">Length</div>
+              <div class="pg-section-body">
+                <div class="pg-mode-row" data-mode="bits">
+                  <label>
+                    <input type="radio" name="gen-mode" value="bits" checked />
+                    <span class="pg-mode-label">Bit length</span>
+                    <input
+                      type="number"
+                      min="1"
+                      step="1"
+                      name="bitlength"
+                      value="112"
+                      class="pg-num-input"
+                    />
+                  </label>
+                  <span class="pg-hint" name="derived-chars-display"></span>
+                </div>
+                <div class="pg-mode-row" data-mode="chars">
+                  <label>
+                    <input type="radio" name="gen-mode" value="chars" />
+                    <span class="pg-mode-label">Character length</span>
+                    <input
+                      type="number"
+                      min="1"
+                      step="1"
+                      name="passlength"
+                      class="pg-num-input"
+                    />
+                  </label>
+                  <span class="pg-hint" name="derived-bits-display"></span>
+                </div>
+              </div>
+            </div>
+
+            <!-- Character Set -->
+            <div class="pg-section">
+              <div class="pg-section-title">Character Set</div>
+              <div class="pg-section-body">
+                <div class="pg-field-row">
+                  <span class="pg-field-label">Symbols</span>
+                  <input
+                    type="text"
+                    name="symbol-charset"
+                    class="pg-symbol-input"
+                  />
+                  <button
+                    type="button"
+                    name="reset-charset"
+                    class="pg-reset-btn"
+                  >
+                    Reset
+                  </button>
+                </div>
+                <div class="pg-field-row">
+                  <span class="pg-field-label">Letters</span>
+                  <select name="sel-letters-allowed" class="pg-select">
+                    <option value="all" selected>
+                      Uppercase and Lowercase
+                    </option>
+                    <option value="only-lower">Only Lowercase</option>
+                    <option value="only-upper">Only Uppercase</option>
+                  </select>
+                </div>
+                <label class="pg-check-label">
+                  <input type="checkbox" name="chk-spaces" />
+                  Can Have Spaces
+                </label>
+              </div>
+            </div>
+
+            <!-- Required Characters -->
+            <div class="pg-section">
+              <div class="pg-section-title">Required Characters</div>
+              <div class="pg-section-body">
+                <div class="pg-checks-grid">
+                  <label class="pg-check-label">
+                    <input type="checkbox" name="chk-upper" />
+                    Uppercase
+                  </label>
+                  <label class="pg-check-label">
+                    <input type="checkbox" name="chk-lower" />
+                    Lowercase
+                  </label>
+                  <label class="pg-check-label">
+                    <input type="checkbox" name="chk-digit" />
+                    Digit
+                  </label>
+                  <label class="pg-check-label">
+                    <input type="checkbox" name="chk-symbol" />
+                    Symbol
+                  </label>
+                </div>
+              </div>
+            </div>
+
+            <!-- Generate CTA -->
+            <button type="button" name="generate" class="pg-generate-btn">
+              Generate Password
+            </button>
+
+            <!-- Result -->
+            <div class="pg-result">
+              <div class="pg-result-row">
+                <input
+                  type="text"
+                  name="password"
+                  class="pg-password-output"
+                  readonly
+                  placeholder="Click Generate…"
+                />
+                <button
+                  type="button"
+                  name="copy-password"
+                  class="pm-icon-btn pm-primary"
+                  title="Copy password"
+                >
+                  <svg
+                    xmlns="http://www.w3.org/2000/svg"
+                    fill="none"
+                    viewBox="0 0 24 24"
+                    stroke-width="1.5"
+                    stroke="currentColor"
+                    aria-hidden="true"
+                  >
+                    <path
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                      d="M11.35 3.836c-.065.21-.1.433-.1.664 0 .414.336.75.75.75h4.5a.75.75 0 0 0 .75-.75 2.25 2.25 0 0 0-.1-.664m-5.8 0A2.251 2.251 0 0 1 13.5 2.25H15c1.012 0 1.867.668 2.15 1.586m-5.8 0c-.376.023-.75.05-1.124.08C9.095 4.01 8.25 4.973 8.25 6.108V8.25m8.9-4.414c.376.023.75.05 1.124.08 1.131.094 1.976 1.057 1.976 2.192V16.5A2.25 2.25 0 0 1 18 18.75h-2.25m-7.5-10.5H4.875c-.621 0-1.125.504-1.125 1.125v11.25c0 .621.504 1.125 1.125 1.125h9.75c.621 0 1.125-.504 1.125-1.125V18.75m-7.5-10.5h6.375c.621 0 1.125.504 1.125 1.125v9.375"
+                    />
+                  </svg>
+                </button>
+              </div>
+              <div class="pg-result-row pg-add-row">
+                <span class="pg-add-label">Add to table</span>
+                <select
+                  name="password-add-table"
+                  class="pg-select pg-add-select"
+                >
+                  <option value="">— select table —</option>
+                </select>
+                <button type="button" name="add-to-table" class="pg-add-btn">
+                  Add
+                </button>
+              </div>
+            </div>
+          </form>
+        </div>
+        <!-- /passgen-panel -->
+
+        <!-- Change password -->
+        <details name="change-password" class="pm-chg-pass-details">
+          <summary>
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke-width="1.5"
+              stroke="currentColor"
+              aria-hidden="true"
+            >
+              <path
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                d="M15.75 5.25a3 3 0 0 1 3 3m3 0a6 6 0 0 1-7.029 5.912c-.563-.097-1.159.026-1.563.43L10.5
+                       17.25H8.25v2.25H6v2.25H2.25v-2.818c0-.597.237-1.17.659-1.591l6.499-6.499c.404-.404.527-1
+                       .43-1.563A6 6 0 0 1 21.75 8.25Z"
+              />
+            </svg>
+            Change Password
+          </summary>
+          <div class="pm-chg-pass-body">
+            <form method="dialog">
+              <div class="pm-form-field">
+                <label for="chg-current-pass">Current Password</label>
+                <div class="pm-pass-field">
+                  <input
+                    type="password"
+                    name="current_pass"
+                    id="chg-current-pass"
+                    autocomplete="current-password"
+                  />
+                  <label class="pm-show-toggle" title="Show / hide password">
+                    <input type="checkbox" name="show-current-pass" />
+                    <svg
+                      class="pm-eye-open"
+                      xmlns="http://www.w3.org/2000/svg"
+                      fill="none"
+                      viewBox="0 0 24 24"
+                      stroke-width="1.5"
+                      stroke="currentColor"
+                      aria-hidden="true"
+                    >
+                      <path
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                        d="M2.036 12.322a1.012 1.012 0 0 1 0-.639C3.423 7.51 7.36 4.5 12 4.5c4.638 0
+                               8.573 3.007 9.963 7.178.07.207.07.431 0 .639C20.577 16.49 16.64 19.5 12
+                               19.5c-4.638 0-8.573-3.007-9.963-7.178Z"
+                      />
+                      <path
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                        d="M15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z"
+                      />
+                    </svg>
+                    <svg
+                      class="pm-eye-closed"
+                      xmlns="http://www.w3.org/2000/svg"
+                      fill="none"
+                      viewBox="0 0 24 24"
+                      stroke-width="1.5"
+                      stroke="currentColor"
+                      aria-hidden="true"
+                    >
+                      <path
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                        d="M3.98 8.223A10.477 10.477 0 0 0 1.934 12C3.226 16.338 7.244 19.5 12
+                               19.5c.993 0 1.953-.138 2.863-.395M6.228 6.228A10.451 10.451 0 0 1 12
+                               4.5c4.756 0 8.773 3.162 10.065 7.498a10.522 10.522 0 0 1-4.293
+                               5.774M6.228 6.228 3 3m3.228 3.228 3.65 3.65m7.894 7.894L21
+                               21m-3.228-3.228-3.65-3.65m0 0a3 3 0 1 0-4.243-4.243m4.242 4.242L9.88 9.88"
+                      />
+                    </svg>
+                  </label>
+                </div>
+              </div>
+              <div class="pm-form-field">
+                <label for="chg-new-pass">New Password</label>
+                <div class="pm-pass-field">
+                  <input
+                    type="password"
+                    name="new_pass_chg"
+                    id="chg-new-pass"
+                    autocomplete="new-password"
+                  />
+                  <label class="pm-show-toggle" title="Show / hide password">
+                    <input type="checkbox" name="show-new-pass-chg" />
+                    <svg
+                      class="pm-eye-open"
+                      xmlns="http://www.w3.org/2000/svg"
+                      fill="none"
+                      viewBox="0 0 24 24"
+                      stroke-width="1.5"
+                      stroke="currentColor"
+                      aria-hidden="true"
+                    >
+                      <path
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                        d="M2.036 12.322a1.012 1.012 0 0 1 0-.639C3.423 7.51 7.36 4.5 12 4.5c4.638 0
+                               8.573 3.007 9.963 7.178.07.207.07.431 0 .639C20.577 16.49 16.64 19.5 12
+                               19.5c-4.638 0-8.573-3.007-9.963-7.178Z"
+                      />
+                      <path
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                        d="M15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z"
+                      />
+                    </svg>
+                    <svg
+                      class="pm-eye-closed"
+                      xmlns="http://www.w3.org/2000/svg"
+                      fill="none"
+                      viewBox="0 0 24 24"
+                      stroke-width="1.5"
+                      stroke="currentColor"
+                      aria-hidden="true"
+                    >
+                      <path
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                        d="M3.98 8.223A10.477 10.477 0 0 0 1.934 12C3.226 16.338 7.244 19.5 12
+                               19.5c.993 0 1.953-.138 2.863-.395M6.228 6.228A10.451 10.451 0 0 1 12
+                               4.5c4.756 0 8.773 3.162 10.065 7.498a10.522 10.522 0 0 1-4.293
+                               5.774M6.228 6.228 3 3m3.228 3.228 3.65 3.65m7.894 7.894L21
+                               21m-3.228-3.228-3.65-3.65m0 0a3 3 0 1 0-4.243-4.243m4.242 4.242L9.88 9.88"
+                      />
+                    </svg>
+                  </label>
+                </div>
+              </div>
+              <div class="pm-form-field">
+                <label for="chg-confirm-pass">Confirm New Password</label>
+                <div class="pm-pass-field">
+                  <input
+                    type="password"
+                    name="confirm_new_pass_chg"
+                    id="chg-confirm-pass"
+                    autocomplete="new-password"
+                  />
+                </div>
+              </div>
+              <div class="pm-chg-pass-footer">
+                <input
+                  type="submit"
+                  name="submit-chg-pass"
+                  value="Change Password"
+                  class="pm-auth-submit"
+                />
+                <span name="chg-pass-status" class="pm-chg-pass-status"></span>
+              </div>
+            </form>
+          </div>
+        </details>
+      </div>
+      <!-- /pm-page-wrap -->
+    </div>
+    <!-- /content -->
+  </body>
+</html>

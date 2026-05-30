@@ -1,0 +1,1028 @@
+// Password Manager – shared component styles
+
+.pm-card {
+  border: 1px solid #d1d5db;
+  border-radius: 8px;
+  margin: 0.75em 0;
+  overflow: hidden;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.07);
+}
+.pm-card-header {
+  display: flex;
+  align-items: center;
+  gap: 0.4em;
+  padding: 0.4em 0.75em;
+  background: #f9fafb;
+  border-bottom: 1px solid #d1d5db;
+}
+.pm-card-name {
+  flex: 1;
+  font-weight: 600;
+  font-size: 0.95em;
+  outline: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  padding: 0.1em 0.2em;
+  background: transparent;
+  cursor: text;
+  min-width: 4em;
+  &:hover {
+    border-bottom-color: #9ca3af;
+  }
+  &:focus {
+    border-bottom-color: #3b82f6;
+  }
+}
+table.pm-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9em;
+  th {
+    background: #f3f4f6;
+    border-bottom: 2px solid #d1d5db;
+    padding: 0.3em 0.6em;
+    text-align: left;
+    font-weight: 600;
+    white-space: nowrap;
+    font-size: 0.82em;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: #6b7280;
+  }
+  td {
+    border-bottom: 1px solid #e5e7eb;
+    padding: 0.3em 0.6em;
+    vertical-align: middle;
+  }
+  .pm-td-data {
+    max-width: 22em;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .pm-td-actions {
+    white-space: nowrap;
+    width: 1%;
+    text-align: right;
+  }
+  tr:last-child td {
+    border-bottom: none;
+  }
+  tbody tr:hover:not(.pm-editing) {
+    background: #f9fafb;
+  }
+  tr.pm-editing td {
+    background: #eff6ff;
+  }
+  tr.pm-editing input,
+  tr.pm-editing textarea,
+  tr.pm-editing select {
+    width: 100%;
+    box-sizing: border-box;
+    padding: 0.2em 0.35em;
+    border: 1px solid #d1d5db;
+    border-radius: 4px;
+    font-family: inherit;
+    font-size: inherit;
+    background: #fff;
+    &:focus {
+      outline: none;
+      border-color: #3b82f6;
+    }
+  }
+  tr.pm-editing textarea {
+    resize: vertical;
+    min-height: 2.5em;
+  }
+  tr.pm-editing td.pm-td-data {
+    overflow: visible;
+    white-space: normal;
+    max-width: none;
+  }
+  // ── Per-cell inline editing (new cell-level edit model) ──────────────────
+  td.pm-cell-selected {
+    outline: 2px solid #93c5fd;
+    outline-offset: -2px;
+    cursor: text;
+  }
+  td.pm-cell-editing {
+    background: #eff6ff;
+    overflow: visible;
+    white-space: normal;
+    max-width: none;
+    cursor: default;
+    input,
+    textarea,
+    select {
+      width: 100%;
+      box-sizing: border-box;
+      padding: 0.2em 0.35em;
+      border: 1px solid #d1d5db;
+      border-radius: 4px;
+      font-family: inherit;
+      font-size: inherit;
+      background: #fff;
+      &:focus {
+        outline: none;
+        border-color: #3b82f6;
+      }
+    }
+    textarea {
+      resize: vertical;
+      min-height: 2.5em;
+    }
+  }
+}
+.pm-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 3px;
+  border: none;
+  border-radius: 5px;
+  cursor: pointer;
+  background: transparent;
+  color: #6b7280;
+  vertical-align: middle;
+  flex-shrink: 0;
+  svg {
+    width: 18px;
+    height: 18px;
+    display: block;
+  }
+  &:hover {
+    background: #f3f4f6;
+    color: #374151;
+  }
+  &.pm-danger {
+    &:hover {
+      background: #fee2e2;
+      color: #dc2626;
+    }
+  }
+  &.pm-success {
+    color: #16a34a;
+    &:hover {
+      background: #dcfce7;
+    }
+  }
+  &.pm-primary {
+    color: #3b82f6;
+    &:hover {
+      background: #eff6ff;
+    }
+  }
+}
+.pm-add-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 0.2em 0.55em;
+  border: 1px dashed #d1d5db;
+  border-radius: 5px;
+  background: transparent;
+  color: #6b7280;
+  font-size: 0.82em;
+  cursor: pointer;
+  white-space: nowrap;
+  svg {
+    width: 13px;
+    height: 13px;
+  }
+  &:hover {
+    border-color: #3b82f6;
+    color: #3b82f6;
+    background: #eff6ff;
+  }
+}
+.pm-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.35);
+  z-index: 999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.pm-modal {
+  background: #fff;
+  border-radius: 10px;
+  padding: 1.25em 1.5em;
+  min-width: 300px;
+  max-width: 90vw;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.25);
+  h3 {
+    margin: 0 0 1em;
+    font-size: 1.05em;
+  }
+}
+.pm-field {
+  margin-bottom: 0.8em;
+  label {
+    display: block;
+    font-size: 0.85em;
+    color: #4b5563;
+    margin-bottom: 0.25em;
+  }
+  input,
+  select {
+    display: block;
+    width: 100%;
+    padding: 0.35em 0.5em;
+    border: 1px solid #d1d5db;
+    border-radius: 5px;
+    font-size: 0.95em;
+    box-sizing: border-box;
+    font-family: inherit;
+    &:focus {
+      outline: none;
+      border-color: #3b82f6;
+      box-shadow: 0 0 0 3px #dbeafe;
+    }
+  }
+}
+.pm-modal-footer {
+  display: flex;
+  gap: 0.5em;
+  justify-content: flex-end;
+  margin-top: 1em;
+}
+.pm-btn {
+  padding: 0.35em 0.9em;
+  border-radius: 5px;
+  border: none;
+  cursor: pointer;
+  font-size: 0.9em;
+  font-family: inherit;
+  &.pm-btn-primary {
+    background: #3b82f6;
+    color: #fff;
+    &:hover {
+      background: #2563eb;
+    }
+  }
+  &.pm-btn-ghost {
+    background: transparent;
+    color: #6b7280;
+    border: 1px solid #d1d5db;
+    &:hover {
+      background: #f3f4f6;
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Password Generator Panel
+// ---------------------------------------------------------------------------
+#passgen-panel {
+  max-width: 560px;
+  width: 100%;
+  background: #fff;
+  border: 1px solid #d1d5db;
+  border-radius: 10px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.07);
+  overflow: hidden;
+  margin: 0.75em 0;
+
+  form {
+    padding: 1rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    margin: 0;
+  }
+
+  // Section groups
+  .pg-section {
+    border: 1px solid #e5e7eb;
+    border-radius: 6px;
+    overflow: hidden;
+  }
+  .pg-section-title {
+    padding: 0.3em 0.75em;
+    background: #f3f4f6;
+    border-bottom: 1px solid #e5e7eb;
+    font-size: 0.78em;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: #6b7280;
+  }
+  .pg-section-body {
+    padding: 0.65rem 0.75rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.45rem;
+  }
+
+  // Length mode rows
+  .pg-mode-row {
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+    padding: 0.35rem 0.4rem;
+    border-radius: 5px;
+    border: 1.5px solid transparent;
+    transition:
+      background 0.12s,
+      border-color 0.12s;
+
+    label {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      cursor: pointer;
+      user-select: none;
+      font-size: 0.9em;
+    }
+    &.pg-mode-row--active {
+      background: #eff6ff;
+      border-color: #bfdbfe;
+      label {
+        color: #1d4ed8;
+        font-weight: 500;
+      }
+      .pg-num-input {
+        border-color: #3b82f6;
+        box-shadow: 0 0 0 2px #dbeafe;
+      }
+    }
+    &.pg-mode-row--inactive {
+      opacity: 0.45;
+    }
+  }
+  .pg-mode-label {
+    min-width: 9.5em;
+    flex-shrink: 0;
+  }
+  .pg-num-input {
+    width: 6rem;
+    min-width: 4rem;
+    padding: 0.28em 0.4em;
+    border: 1px solid #d1d5db;
+    border-radius: 5px;
+    font-size: 0.9em;
+    font-family: inherit;
+    text-align: right;
+    &:focus {
+      outline: none;
+      border-color: #3b82f6;
+      box-shadow: 0 0 0 2px #dbeafe;
+    }
+    &:disabled {
+      background: transparent;
+      cursor: default;
+      -webkit-text-fill-color: inherit;
+    }
+  }
+  .pg-hint {
+    padding-left: 1.5rem;
+    font-size: 0.78em;
+    color: #6b7280;
+    font-style: italic;
+    min-height: 1em;
+    &.pg-hint--warn {
+      color: #dc2626;
+      font-style: normal;
+      font-weight: 500;
+    }
+  }
+
+  // Character Set section
+  .pg-field-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+  }
+  .pg-field-label {
+    font-size: 0.87em;
+    color: #4b5563;
+    font-weight: 500;
+    flex: 0 0 4.5em;
+  }
+  .pg-symbol-input {
+    flex: 1;
+    min-width: 0;
+    padding: 0.28em 0.4em;
+    border: 1px solid #d1d5db;
+    border-radius: 5px;
+    font-family: "Courier New", monospace;
+    font-size: 0.87em;
+    &:focus {
+      outline: none;
+      border-color: #3b82f6;
+      box-shadow: 0 0 0 2px #dbeafe;
+    }
+  }
+  .pg-reset-btn {
+    flex-shrink: 0;
+    padding: 0.25em 0.65em;
+    border-radius: 5px;
+    border: 1px solid #d1d5db;
+    background: transparent;
+    color: #6b7280;
+    cursor: pointer;
+    font-size: 0.82em;
+    font-family: inherit;
+    &:hover {
+      background: #f3f4f6;
+      color: #374151;
+    }
+  }
+  .pg-select {
+    flex: 1;
+    min-width: 0;
+    padding: 0.28em 0.4em;
+    border: 1px solid #d1d5db;
+    border-radius: 5px;
+    font-size: 0.87em;
+    font-family: inherit;
+    background: #fff;
+    &:focus {
+      outline: none;
+      border-color: #3b82f6;
+      box-shadow: 0 0 0 2px #dbeafe;
+    }
+  }
+
+  // Required Characters checkboxes
+  .pg-checks-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.2rem 1.5rem;
+  }
+  .pg-check-label {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    font-size: 0.88em;
+    cursor: pointer;
+    user-select: none;
+    padding: 0.15rem 0;
+    input[type="checkbox"] {
+      cursor: pointer;
+      flex-shrink: 0;
+    }
+  }
+
+  // Generate CTA
+  .pg-generate-btn {
+    width: 100%;
+    padding: 0.6em 1em;
+    background: #3b82f6;
+    color: #fff;
+    border: none;
+    border-radius: 7px;
+    font-size: 1rem;
+    font-weight: 500;
+    font-family: inherit;
+    cursor: pointer;
+    &:hover {
+      background: #2563eb;
+    }
+    &:active {
+      background: #1d4ed8;
+    }
+  }
+
+  // Result area
+  .pg-result {
+    border: 1px solid #d1d5db;
+    border-radius: 7px;
+    background: #f9fafb;
+    overflow: hidden;
+  }
+  .pg-result-row {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.5rem 0.6rem;
+    & + .pg-result-row {
+      border-top: 1px solid #e5e7eb;
+    }
+  }
+  .pg-password-output {
+    flex: 1;
+    min-width: 0;
+    background: transparent;
+    border: none;
+    font-family: "Courier New", monospace;
+    font-size: 0.95em;
+    color: #111827;
+    outline: none;
+    &::placeholder {
+      color: #9ca3af;
+      font-style: italic;
+      font-family: inherit;
+    }
+  }
+  .pg-add-row {
+    font-size: 0.87em;
+    flex-wrap: wrap;
+  }
+  .pg-add-label {
+    color: #6b7280;
+    flex: 0 0 auto;
+    white-space: nowrap;
+  }
+  .pg-add-select {
+    min-width: 8em;
+  }
+  .pg-add-btn {
+    flex-shrink: 0;
+    padding: 0.25em 0.65em;
+    border-radius: 5px;
+    border: 1px solid #d1d5db;
+    background: transparent;
+    color: #374151;
+    cursor: pointer;
+    font-size: inherit;
+    font-family: inherit;
+    &:hover {
+      background: #f3f4f6;
+    }
+  }
+
+  // Responsive
+  @media (max-width: 400px) {
+    .pg-checks-grid {
+      grid-template-columns: 1fr;
+    }
+    .pg-mode-label {
+      min-width: 7.5em;
+    }
+    .pg-hint {
+      padding-left: 0;
+    }
+    .pg-field-label {
+      flex: 0 0 100%;
+    }
+  }
+  @media (pointer: coarse) {
+    .pg-check-label {
+      min-height: 44px;
+    }
+    .pg-mode-row label {
+      min-height: 44px;
+    }
+    .pg-generate-btn {
+      padding: 0.8em 1em;
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Page scaffolding
+// ---------------------------------------------------------------------------
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+  font-family:
+    system-ui,
+    -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
+    Roboto,
+    Helvetica,
+    Arial,
+    sans-serif;
+  font-size: 15px;
+  line-height: 1.5;
+  color: #111827;
+  background: #f3f4f6;
+  min-height: 100vh;
+}
+
+// ---------------------------------------------------------------------------
+// Auth phase  —  centered card on a neutral background
+// ---------------------------------------------------------------------------
+.pm-auth-wrap {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  padding: 1.5rem;
+}
+
+.pm-auth-card {
+  background: #ffffff;
+  border-radius: 14px;
+  box-shadow: 0 4px 32px rgba(0, 0, 0, 0.1);
+  width: 100%;
+  max-width: 440px;
+  overflow: hidden;
+  border-top: 4px solid #3b82f6;
+  padding: 2rem 2rem 1.75rem;
+}
+
+// Brand / logo lockup at the top of the auth card
+.pm-auth-brand {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 1.75rem;
+  svg {
+    width: 28px;
+    height: 28px;
+    color: #3b82f6;
+    flex-shrink: 0;
+  }
+  h1 {
+    margin: 0;
+    font-size: 1.25rem;
+    font-weight: 700;
+    color: #111827;
+    letter-spacing: -0.01em;
+  }
+}
+
+// Error / status message panel
+#error-panel {
+  color: #dc2626;
+  font-size: 0.875em;
+  min-height: 1.4em;
+  margin: -0.5rem 0 0.85rem;
+  padding: 0;
+}
+
+// Tab navigation (Login / Register switcher)
+.pm-auth-tabs {
+  display: flex;
+  gap: 0;
+  border-bottom: 2px solid #e5e7eb;
+  margin-bottom: 1.5rem;
+}
+.pm-auth-tab {
+  display: inline-block;
+  padding: 0.45rem 1rem;
+  font-size: 0.9em;
+  font-weight: 500;
+  color: #6b7280;
+  text-decoration: none;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -2px;
+  cursor: pointer;
+  transition: color 0.12s;
+  user-select: none;
+  &:hover {
+    color: #374151;
+  }
+  &.pm-auth-tab--active {
+    color: #1d4ed8;
+    border-bottom-color: #3b82f6;
+    cursor: default;
+    font-weight: 600;
+  }
+}
+
+// Form field: label + input stacked
+.pm-form-field {
+  margin-bottom: 1rem;
+  label {
+    display: block;
+    font-size: 0.875em;
+    font-weight: 500;
+    color: #374151;
+    margin-bottom: 0.3rem;
+  }
+  input[type="text"],
+  input[type="password"] {
+    display: block;
+    width: 100%;
+    padding: 0.5em 0.65em;
+    border: 1px solid #d1d5db;
+    border-radius: 6px;
+    font-size: 0.95em;
+    font-family: inherit;
+    color: #111827;
+    background: #fff;
+    transition:
+      border-color 0.12s,
+      box-shadow 0.12s;
+    &:focus {
+      outline: none;
+      border-color: #3b82f6;
+      box-shadow: 0 0 0 3px #dbeafe;
+    }
+  }
+}
+
+// Hint text below a form field (e.g. username validity)
+.pm-field-hint {
+  margin: 0.3rem 0 0;
+  font-size: 0.8em;
+  color: #6b7280;
+  line-height: 1.4;
+}
+
+// Password input wrapper: positions eye-toggle inside the input
+.pm-pass-field {
+  position: relative;
+  input[type="password"],
+  input[type="text"] {
+    padding-right: 2.4rem; // leave room for the eye icon
+  }
+}
+
+// Eye icon show/hide toggle — checkbox visually hidden, label acts as button
+.pm-show-toggle {
+  position: absolute;
+  right: 0.45rem;
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+  color: #9ca3af;
+  padding: 0.15rem;
+  border-radius: 4px;
+  transition: color 0.12s;
+  &:hover {
+    color: #6b7280;
+  }
+  // Checkbox is kept in the DOM (TS .change event still fires) but invisible
+  input[type="checkbox"] {
+    position: absolute;
+    opacity: 0;
+    pointer-events: none;
+    width: 0;
+    height: 0;
+    margin: 0;
+  }
+  svg {
+    width: 18px;
+    height: 18px;
+    display: block;
+    flex-shrink: 0;
+  }
+  .pm-eye-closed {
+    display: none;
+  }
+  // When checkbox is checked → password is visible → show the "slash" icon
+  &:has(input:checked) {
+    color: #3b82f6;
+    .pm-eye-open {
+      display: none;
+    }
+    .pm-eye-closed {
+      display: block;
+    }
+  }
+}
+
+// Full-width submit button (auth forms)
+.pm-auth-submit {
+  display: inline-block;
+  padding: 0.6em 1.25em;
+  background: #3b82f6;
+  color: #ffffff;
+  border: none;
+  border-radius: 7px;
+  font-size: 0.95em;
+  font-weight: 500;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background 0.12s;
+  &:hover {
+    background: #2563eb;
+  }
+  &:active {
+    background: #1d4ed8;
+  }
+  // Inside auth card → stretch to full width
+  .pm-auth-card & {
+    display: block;
+    width: 100%;
+    margin-top: 0.35rem;
+    padding: 0.65em;
+    font-size: 1rem;
+  }
+}
+
+// Server settings collapsible
+.pm-server-settings {
+  border-top: 1px solid #e5e7eb;
+  margin-top: 1.5rem;
+  summary {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.75rem 0;
+    cursor: pointer;
+    font-size: 0.82em;
+    font-weight: 500;
+    color: #6b7280;
+    user-select: none;
+    list-style: none;
+    &::-webkit-details-marker {
+      display: none;
+    }
+    &::after {
+      content: "▾";
+      margin-left: auto;
+      font-size: 0.9em;
+      transition: transform 0.15s;
+      display: inline-block;
+    }
+  }
+  &[open] summary::after {
+    transform: rotate(-180deg);
+  }
+}
+.pm-server-settings-body {
+  padding: 0.5rem 0 0.25rem;
+}
+
+// ---------------------------------------------------------------------------
+// Content phase  —  full-page layout after login
+// ---------------------------------------------------------------------------
+#content {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+  background: #f3f4f6;
+}
+
+// Sticky top bar (brand + status + action buttons)
+.pm-app-bar {
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.6rem 1.25rem;
+  background: #ffffff;
+  border-bottom: 1px solid #e5e7eb;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
+}
+.pm-app-bar-brand {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-weight: 700;
+  font-size: 0.95rem;
+  color: #111827;
+  flex: 1;
+  white-space: nowrap;
+  svg {
+    width: 20px;
+    height: 20px;
+    color: #3b82f6;
+    flex-shrink: 0;
+  }
+}
+.pm-app-bar-status {
+  font-size: 0.8em;
+  color: #6b7280;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 22em;
+}
+.pm-app-bar-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-shrink: 0;
+}
+
+// Max-width content well, centered
+.pm-page-wrap {
+  max-width: 800px;
+  margin: 0 auto;
+  padding: 1.5rem 1rem 4rem;
+  width: 100%;
+}
+
+// Section separator label (e.g. "Password Generator")
+.pm-section-label {
+  margin: 1.75rem 0 0.6rem;
+  font-size: 0.75em;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #6b7280;
+  padding-bottom: 0.4rem;
+  border-bottom: 1px solid #e5e7eb;
+}
+
+// Change Password  —  styled collapsible card
+.pm-chg-pass-details {
+  margin-top: 1.75rem;
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
+  background: #ffffff;
+  overflow: hidden;
+  summary {
+    display: flex;
+    align-items: center;
+    gap: 0.45rem;
+    padding: 0.8rem 1rem;
+    cursor: pointer;
+    font-size: 0.9em;
+    font-weight: 600;
+    color: #374151;
+    user-select: none;
+    list-style: none;
+    &::-webkit-details-marker {
+      display: none;
+    }
+    svg {
+      width: 16px;
+      height: 16px;
+      color: #6b7280;
+      flex-shrink: 0;
+    }
+    &::after {
+      content: "▾";
+      margin-left: auto;
+      font-size: 0.9em;
+      color: #9ca3af;
+      transition: transform 0.15s;
+      display: inline-block;
+    }
+    &:hover {
+      background: #f9fafb;
+    }
+  }
+  &[open] summary::after {
+    transform: rotate(-180deg);
+  }
+}
+.pm-chg-pass-body {
+  padding: 1.25rem;
+  border-top: 1px solid #e5e7eb;
+}
+// Submit + status side by side
+.pm-chg-pass-footer {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  margin-top: 1rem;
+  flex-wrap: wrap;
+}
+.pm-chg-pass-status {
+  font-size: 0.875em;
+  color: #6b7280;
+}
+
+// ---------------------------------------------------------------------------
+// Responsive adjustments
+// ---------------------------------------------------------------------------
+@media (max-width: 600px) {
+  .pm-auth-wrap {
+    padding: 1rem;
+    align-items: flex-start;
+  }
+  .pm-auth-card {
+    border-radius: 10px;
+    padding: 1.5rem 1.25rem 1.5rem;
+  }
+  .pm-app-bar {
+    padding: 0.5rem 0.75rem;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+  }
+  .pm-app-bar-status {
+    order: 3;
+    flex: 0 0 100%;
+    max-width: none;
+    font-size: 0.75em;
+  }
+  .pm-page-wrap {
+    padding: 1rem 0.75rem 3rem;
+  }
+}
+
+@media (max-width: 400px) {
+  .pm-auth-wrap {
+    padding: 0;
+  }
+  .pm-auth-card {
+    border-radius: 0;
+    border-top-width: 3px;
+    box-shadow: none;
+    min-height: 100vh;
+  }
+}
+
+@media (pointer: coarse) {
+  .pm-show-toggle {
+    padding: 0.35rem;
+    svg {
+      width: 20px;
+      height: 20px;
+    }
+  }
+  .pm-auth-submit {
+    min-height: 44px;
+  }
+}
