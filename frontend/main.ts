@@ -1,6 +1,7 @@
 import { initWasm, encryptBlob } from "./passman_crypto_glue";
 import {
   initLoginArea,
+  credentialHeaders,
   deriveUserKeys,
   readServerAccessParams,
   type LoginResult,
@@ -119,8 +120,6 @@ document.addEventListener("DOMContentLoaded", async () => {
 
     const url = new URL("/pass-table", window.location.origin);
     url.searchParams.set("username", username);
-    url.searchParams.set("auth_key", authKeyB64);
-    url.searchParams.set("server_pass", serverPass);
     if (serverNs != null) url.searchParams.set("server_ns", serverNs);
 
     let response: Response;
@@ -128,6 +127,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       response = await fetch(url.toString(), {
         method: "POST",
         headers: {
+          ...credentialHeaders(authKeyB64, serverPass),
           "Content-Type": "application/octet-stream",
           "Content-Length": String(blob.byteLength),
         },

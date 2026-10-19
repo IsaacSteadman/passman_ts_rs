@@ -1154,6 +1154,7 @@ dependencies = [
  "futures-util",
  "im",
  "passman_crypto",
+ "percent-encoding",
  "rand",
  "serde",
  "serde_json",

@@ -24,6 +24,7 @@ futures-core = "0.3.31"
 futures-util = "0.3.31"
 im = "15.1.0"
 passman_crypto = { path = "passman_crypto" }
+percent-encoding = "2.3.2"
 rand = "0.9.2"
 serde = "1.0.228"
 serde_json = "1.0.145"

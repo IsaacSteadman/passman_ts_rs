@@ -1,6 +1,6 @@
-use crate::{
-    routes::base::{AppState, GetUser, GetWillMutUser, WritingFile, get_content_length},
-    server_policy::PolicyParams,
+use crate::routes::base::{
+    AUTH_KEY_HEADER, AppState, GetUser, GetWillMutUser, WritingFile, auth_key_header,
+    get_content_length, policy_params,
 };
 use actix_web::{HttpRequest, HttpResponse, Responder, http::header, put, web};
 use futures_util::StreamExt;
@@ -10,10 +10,8 @@ use tokio::sync::OwnedRwLockReadGuard;
 
 #[derive(Debug, Deserialize)]
 struct PutPassTableParams {
-    #[serde(flatten)]
-    policy: PolicyParams,
     username: String,
-    auth_key: String,
+    server_ns: Option<String>,
 }
 
 #[put("/pass-table")]
@@ -36,16 +34,23 @@ pub async fn route(
             "message": "the condition header is required to be specified"
         }));
     };
-    let content_length = match get_content_length(req) {
+    let content_length = match get_content_length(&req) {
         Err(e) => return e,
         Ok(o) => o,
     };
 
     let PutPassTableParams {
-        auth_key,
-        policy,
         username,
+        server_ns,
     } = query.into_inner();
+    let policy = match policy_params(&req, server_ns) {
+        Err(e) => return e,
+        Ok(o) => o,
+    };
+    let auth_key = match auth_key_header(&req, AUTH_KEY_HEADER) {
+        Err(e) => return e,
+        Ok(o) => o,
+    };
     let mut len_checker = match app_state
         .policies_and_config
         .update_account_hook_accum_len(policy)
@@ -66,7 +71,7 @@ pub async fn route(
             },
         write_file_path,
     } = match app_state
-        .get_will_mut_user(&username, &auth_key, "auth_key")
+        .get_will_mut_user(&username, &auth_key, AUTH_KEY_HEADER)
         .await
     {
         Err(e) => return e,

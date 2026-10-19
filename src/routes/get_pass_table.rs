@@ -1,31 +1,36 @@
-use crate::{
-    routes::base::{AppState, GetUser, UserDataHeader},
-    server_policy::PolicyParams,
+use crate::routes::base::{
+    AUTH_KEY_HEADER, AppState, GetUser, UserDataHeader, auth_key_header, policy_params,
 };
-use actix_web::{HttpResponse, Responder, get, http::header, web};
+use actix_web::{HttpRequest, HttpResponse, Responder, get, http::header, web};
 use serde::Deserialize;
 use serde_json::json;
 use tokio::io::AsyncReadExt;
 
 #[derive(Debug, Deserialize)]
 struct GetPassTableParams {
-    #[serde(flatten)]
-    policy: PolicyParams,
     username: String,
-    auth_key: String,
+    server_ns: Option<String>,
 }
 
 #[get("/pass-table")]
 pub async fn route(
     app_state: web::Data<AppState>,
     query: web::Query<GetPassTableParams>,
+    req: HttpRequest,
 ) -> impl Responder {
     eprintln!("GET /pass-table\n  query = {query:?}");
     let GetPassTableParams {
-        auth_key,
-        policy,
         username,
+        server_ns,
     } = query.into_inner();
+    let policy = match policy_params(&req, server_ns) {
+        Err(e) => return e,
+        Ok(o) => o,
+    };
+    let auth_key = match auth_key_header(&req, AUTH_KEY_HEADER) {
+        Err(e) => return e,
+        Ok(o) => o,
+    };
     let len_checker = match app_state
         .policies_and_config
         .read_account_server_policy_auth(policy)
@@ -40,7 +45,10 @@ pub async fn route(
         mut read_file,
         metadata,
         ..
-    } = match app_state.get_user(&username, &auth_key, "auth_key").await {
+    } = match app_state
+        .get_user(&username, &auth_key, AUTH_KEY_HEADER)
+        .await
+    {
         Err(e) => return e,
         Ok(o) => o,
     };

@@ -153,6 +153,12 @@ mod tests {
         })
     }
 
+    /// Adds the credential headers the frontend sends.
+    fn with_credentials(req: test::TestRequest, auth_key: &str) -> test::TestRequest {
+        req.insert_header((routes::base::AUTH_KEY_HEADER, auth_key))
+            .insert_header((routes::base::SERVER_PASS_HEADER, "testpass"))
+    }
+
     macro_rules! init_app {
         ($state:expr) => {
             test::init_service(
@@ -176,17 +182,14 @@ mod tests {
 
         let username = "alice";
         let password = "hunter2";
-        let server_pass = "testpass";
         let auth_key = derive_client_auth_key(username, password);
 
         // --- Register ---
         // The body is a minimal dummy blob; the server stores it verbatim.
         let dummy_body = vec![0xffu8; 64];
-        let register_uri = format!(
-            "/pass-table?username={username}&auth_key={auth_key}&server_pass={server_pass}"
-        );
-        let req = test::TestRequest::post()
-            .uri(&register_uri)
+        let uri = format!("/pass-table?username={username}");
+        let req = with_credentials(test::TestRequest::post(), &auth_key)
+            .uri(&uri)
             .insert_header(("Content-Type", "application/octet-stream"))
             .insert_header(("Content-Length", dummy_body.len().to_string()))
             .set_payload(dummy_body)
@@ -200,7 +203,9 @@ mod tests {
         );
 
         // --- Login ---
-        let req = test::TestRequest::get().uri(&register_uri).to_request();
+        let req = with_credentials(test::TestRequest::get(), &auth_key)
+            .uri(&uri)
+            .to_request();
         let resp: actix_web::dev::ServiceResponse = test::call_service(&app, req).await;
         assert_eq!(
             resp.status().as_u16(),
@@ -219,10 +224,8 @@ mod tests {
         let app = init_app!(state);
 
         let auth_key = derive_client_auth_key("dave", "secret");
-        let req = test::TestRequest::post()
-            .uri(&format!(
-                "/pass-table?username=dave&auth_key={auth_key}&server_pass=testpass"
-            ))
+        let req = with_credentials(test::TestRequest::post(), &auth_key)
+            .uri("/pass-table?username=dave")
             .insert_header(("Content-Length", "64"))
             .set_payload(vec![0u8; 64])
             .to_request();
@@ -244,12 +247,11 @@ mod tests {
         let app = init_app!(state);
 
         let auth_key = derive_client_auth_key("bob", "secret");
-        let uri = format!("/pass-table?username=bob&auth_key={auth_key}&server_pass=testpass");
         let body = vec![0u8; 64];
 
         for expected_status in [201u16, 409] {
-            let req = test::TestRequest::post()
-                .uri(&uri)
+            let req = with_credentials(test::TestRequest::post(), &auth_key)
+                .uri("/pass-table?username=bob")
                 .insert_header(("Content-Type", "application/octet-stream"))
                 .insert_header(("Content-Length", body.len().to_string()))
                 .set_payload(body.clone())
@@ -257,6 +259,26 @@ mod tests {
             let resp: actix_web::dev::ServiceResponse = test::call_service(&app, req).await;
             assert_eq!(resp.status().as_u16(), expected_status);
         }
+    }
+
+    /// Credentials are only read from headers, never from the query string.
+    #[actix_web::test]
+    async fn credentials_in_query_are_not_accepted() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let state = make_test_app(tmpdir.path()).await;
+        let app = init_app!(state);
+
+        let auth_key = derive_client_auth_key("erin", "secret");
+        let req = test::TestRequest::post()
+            .uri(&format!(
+                "/pass-table?username=erin&auth_key={auth_key}&server_pass=testpass"
+            ))
+            .insert_header(("Content-Length", "64"))
+            .set_payload(vec![0u8; 64])
+            .to_request();
+        let resp: actix_web::dev::ServiceResponse = test::call_service(&app, req).await;
+        assert_eq!(resp.status().as_u16(), 400);
+        assert!(!tmpdir.path().join("server_data/erin").exists());
     }
 
     /// Logging in with a wrong password must return 400.
@@ -270,10 +292,8 @@ mod tests {
         let wrong_key = derive_client_auth_key("carol", "wrongpass");
 
         // Register
-        let reg_uri =
-            format!("/pass-table?username=carol&auth_key={right_key}&server_pass=testpass");
-        let req = test::TestRequest::post()
-            .uri(&reg_uri)
+        let req = with_credentials(test::TestRequest::post(), &right_key)
+            .uri("/pass-table?username=carol")
             .insert_header(("Content-Type", "application/octet-stream"))
             .insert_header(("Content-Length", "64"))
             .set_payload(vec![0u8; 64])
@@ -282,9 +302,9 @@ mod tests {
         assert_eq!(resp.status().as_u16(), 201);
 
         // Login with wrong key
-        let bad_uri =
-            format!("/pass-table?username=carol&auth_key={wrong_key}&server_pass=testpass");
-        let req = test::TestRequest::get().uri(&bad_uri).to_request();
+        let req = with_credentials(test::TestRequest::get(), &wrong_key)
+            .uri("/pass-table?username=carol")
+            .to_request();
         let resp: actix_web::dev::ServiceResponse = test::call_service(&app, req).await;
         assert_eq!(resp.status().as_u16(), 400);
     }

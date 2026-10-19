@@ -182,7 +182,8 @@ pub struct PolicyStorage {
     path: PathBuf,
 }
 
-#[derive(Debug, Deserialize)]
+/// Built by `routes::base::policy_params`; deliberately not `Debug` so the
+/// server password can't end up in a log line.
 pub struct PolicyParams {
     pub server_pass: String,
     pub server_ns: Option<String>,
@@ -269,7 +270,7 @@ impl PolicyStorage {
                 None => {
                     return Err(HttpResponse::BadRequest().json(json!({
                         "type": "E_SERVER_NS",
-                        "query_params": ["server_ns", "server_pass"],
+                        "params": ["server_ns", "Passman-Server-Pass"],
                         "message": "unrecognized server_ns or server_pass"
                     })));
                 }
@@ -293,7 +294,7 @@ impl PolicyStorage {
             } else {
                 return Err(HttpResponse::BadRequest().json(json!({
                     "type": "E_SERVER_NS",
-                    "query_params": ["server_ns", "server_pass"],
+                    "params": ["server_ns", "Passman-Server-Pass"],
                     "message": "unrecognized server_ns or server_pass"
                 })));
             }
@@ -307,7 +308,7 @@ impl PolicyStorage {
         } else {
             Err(HttpResponse::BadRequest().json(json!({
                 "type": "E_SERVER_NS",
-                "query_params": ["server_ns", "server_pass"],
+                "params": ["server_ns", "Passman-Server-Pass"],
                 "message": "unrecognized server_ns or server_pass"
             })))
         }
@@ -323,7 +324,7 @@ impl PolicyStorage {
                 None => {
                     return Err(HttpResponse::BadRequest().json(json!({
                         "type": "E_SERVER_NS",
-                        "query_params": ["server_ns", "server_pass"],
+                        "params": ["server_ns", "Passman-Server-Pass"],
                         "message": "unrecognized server_ns or server_pass"
                     })));
                 }
@@ -347,7 +348,7 @@ impl PolicyStorage {
                     None => {
                         return Err(HttpResponse::BadRequest().json(json!({
                             "type": "E_SERVER_NS",
-                            "query_params": ["server_ns", "server_pass"],
+                            "params": ["server_ns", "Passman-Server-Pass"],
                             "message": "unrecognized server_ns or server_pass"
                         })));
                     }
@@ -391,7 +392,7 @@ impl PolicyStorage {
             } else {
                 return Err(HttpResponse::BadRequest().json(json!({
                     "type": "E_SERVER_NS",
-                    "query_params": ["server_ns", "server_pass"],
+                    "params": ["server_ns", "Passman-Server-Pass"],
                     "message": "unrecognized server_ns or server_pass"
                 })));
             }
@@ -405,7 +406,7 @@ impl PolicyStorage {
         } else {
             Err(HttpResponse::BadRequest().json(json!({
                 "type": "E_SERVER_NS",
-                "query_params": ["server_ns", "server_pass"],
+                "params": ["server_ns", "Passman-Server-Pass"],
                 "message": "unrecognized server_ns or server_pass"
             })))
         }
@@ -421,7 +422,7 @@ impl PolicyStorage {
                 None => {
                     return Err(HttpResponse::BadRequest().json(json!({
                         "type": "E_SERVER_NS",
-                        "query_params": ["server_ns", "server_pass"],
+                        "params": ["server_ns", "Passman-Server-Pass"],
                         "message": "unrecognized server_ns or server_pass"
                     })));
                 }
@@ -447,7 +448,7 @@ impl PolicyStorage {
             } else {
                 return Err(HttpResponse::BadRequest().json(json!({
                     "type": "E_SERVER_NS",
-                    "query_params": ["server_ns", "server_pass"],
+                    "params": ["server_ns", "Passman-Server-Pass"],
                     "message": "unrecognized server_ns or server_pass"
                 })));
             }
@@ -461,7 +462,7 @@ impl PolicyStorage {
         } else {
             Err(HttpResponse::BadRequest().json(json!({
                 "type": "E_SERVER_NS",
-                "query_params": ["server_ns", "server_pass"],
+                "params": ["server_ns", "Passman-Server-Pass"],
                 "message": "unrecognized server_ns or server_pass"
             })))
         }
@@ -513,7 +514,11 @@ mod tests {
     async fn uncommitted_account_creation_is_rolled_back() {
         let dir = tempfile::tempdir().unwrap();
         let storage = limited_storage(dir.path()).await;
-        let checker = match storage.clone().create_account_hook_accum_len_auth(ns_params()).await {
+        let checker = match storage
+            .clone()
+            .create_account_hook_accum_len_auth(ns_params())
+            .await
+        {
             Ok(o) => o,
             Err(_) => panic!("account creation should be allowed"),
         };
@@ -527,11 +532,14 @@ mod tests {
     async fn committed_account_creation_is_kept() {
         let dir = tempfile::tempdir().unwrap();
         let storage = limited_storage(dir.path()).await;
-        let mut checker =
-            match storage.clone().create_account_hook_accum_len_auth(ns_params()).await {
-                Ok(o) => o,
-                Err(_) => panic!("account creation should be allowed"),
-            };
+        let mut checker = match storage
+            .clone()
+            .create_account_hook_accum_len_auth(ns_params())
+            .await
+        {
+            Ok(o) => o,
+            Err(_) => panic!("account creation should be allowed"),
+        };
         checker.commit();
         drop(checker);
         settle().await;
@@ -550,11 +558,14 @@ mod tests {
     async fn policy_changes_are_saved_to_base_dir() {
         let dir = tempfile::tempdir().unwrap();
         let storage = limited_storage(dir.path()).await;
-        let mut checker =
-            match storage.clone().create_account_hook_accum_len_auth(ns_params()).await {
-                Ok(o) => o,
-                Err(_) => panic!("account creation should be allowed"),
-            };
+        let mut checker = match storage
+            .clone()
+            .create_account_hook_accum_len_auth(ns_params())
+            .await
+        {
+            Ok(o) => o,
+            Err(_) => panic!("account creation should be allowed"),
+        };
         checker.commit();
         let path = dir.path().join("policies.json");
         let saved_num_accounts = || {

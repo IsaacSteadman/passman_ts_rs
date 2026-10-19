@@ -1,5 +1,6 @@
-use crate::server_policy::PolicyStorage;
+use crate::server_policy::{PolicyParams, PolicyStorage};
 use actix_web::{HttpRequest, HttpResponse, http::header, web};
+use percent_encoding::percent_decode_str;
 use rand::{TryRngCore, rngs::OsRng};
 use serde_json::json;
 use std::{collections::HashMap, fs::Metadata, path::PathBuf, sync::Arc};
@@ -10,6 +11,13 @@ use tokio::{
 };
 
 pub use passman_crypto::{Argon2Params, HASH_SIZE};
+
+// Credentials are sent in these headers rather than the query string so they
+// stay out of URLs, proxy access logs and the request logging below.
+pub const AUTH_KEY_HEADER: &str = "Passman-Auth-Key";
+pub const NEW_AUTH_KEY_HEADER: &str = "Passman-New-Auth-Key";
+/// percent-encoded (`encodeURIComponent`), since header values must be ASCII
+pub const SERVER_PASS_HEADER: &str = "Passman-Server-Pass";
 
 #[repr(packed)]
 pub struct UserDataHeader {
@@ -78,10 +86,10 @@ impl AppState {
         &self,
         username: &str,
         password: &str,
-        password_query_param_name: &str,
+        password_header_name: &str,
     ) -> Result<GetUser<'_>, HttpResponse> {
         validate_username(&username)?;
-        let password = validate_password(password, password_query_param_name)?;
+        let password = validate_password(password, password_header_name)?;
         let user_locks = self.user_locks.read().await;
         let user_path = self.server_data_dir.join(username);
         let user_lock = if let Some(x) = user_locks.get(username) {
@@ -94,7 +102,7 @@ impl AppState {
                     Err(_) => {
                         return Err(HttpResponse::Conflict().json(json!({
                             "type": "E_AUTH_CONFLICT",
-                            "query_params": ["username", password_query_param_name],
+                            "params": ["username", password_header_name],
                             "message": "try again",
                         })));
                     }
@@ -107,7 +115,7 @@ impl AppState {
             } else {
                 return Err(HttpResponse::BadRequest().json(json!({
                     "type": "E_AUTH",
-                    "query_params": ["username", password_query_param_name],
+                    "params": ["username", password_header_name],
                     "message": "username or password is incorrect",
                 })));
             }
@@ -120,7 +128,7 @@ impl AppState {
                 );
                 return Err(HttpResponse::BadRequest().json(json!({
                     "type": "E_AUTH",
-                    "query_params": ["username", password_query_param_name],
+                    "params": ["username", password_header_name],
                     "message": "username or password is incorrect",
                 })));
             }
@@ -133,7 +141,7 @@ impl AppState {
                 );
                 return Err(HttpResponse::BadRequest().json(json!({
                     "type": "E_AUTH",
-                    "query_params": ["username", password_query_param_name],
+                    "params": ["username", password_header_name],
                     "message": "username or password is incorrect",
                 })));
             }
@@ -148,7 +156,7 @@ impl AppState {
                 );
                 return Err(HttpResponse::BadRequest().json(json!({
                     "type": "E_AUTH",
-                    "query_params": ["username", password_query_param_name],
+                    "params": ["username", password_header_name],
                     "message": "username or password is incorrect",
                 })));
             }
@@ -159,7 +167,7 @@ impl AppState {
         if !bool::from(ConstantTimeEq::ct_eq(expected, actual)) {
             return Err(HttpResponse::BadRequest().json(json!({
                 "type": "E_AUTH",
-                "query_params": ["username", password_query_param_name],
+                "params": ["username", password_header_name],
                 "message": "username or password is incorrect",
             })));
         }
@@ -188,10 +196,10 @@ impl AppState {
         &self,
         username: &str,
         password: &str,
-        password_query_param_name: &str,
+        password_header_name: &str,
     ) -> Result<GetWillMutUser<'_>, HttpResponse> {
         let base = self
-            .get_user(username, password, password_query_param_name)
+            .get_user(username, password, password_header_name)
             .await?;
         let write_file_path = self.server_data_dir.join(format!(".{}.tmp", username));
         Ok(GetWillMutUser {
@@ -211,7 +219,7 @@ pub fn validate_username(username: &str) -> Result<(), HttpResponse> {
             if count == 0 {
                 return Err(HttpResponse::BadRequest().json(json!({
                     "type": "E_AUTH",
-                    "query_param": "username",
+                    "param": "username",
                     "message": "bad username characters, cannot start with '-_.$'",
                 })));
             }
@@ -219,7 +227,7 @@ pub fn validate_username(username: &str) -> Result<(), HttpResponse> {
         } else {
             return Err(HttpResponse::BadRequest().json(json!({
                 "type": "E_AUTH",
-                "query_param": "username",
+                "param": "username",
                 "message": format!("bad username characters, cannot contain {:?}", ch),
             })));
         }
@@ -228,20 +236,20 @@ pub fn validate_username(username: &str) -> Result<(), HttpResponse> {
     if is_last_special {
         return Err(HttpResponse::BadRequest().json(json!({
             "type": "E_AUTH",
-            "query_param": "username",
+            "param": "username",
             "message": "bad username characters, cannot end with '-_.$'",
         })));
     }
     if count == 0 {
         return Err(HttpResponse::BadRequest().json(json!({
             "type": "E_AUTH",
-            "query_param": "username",
+            "param": "username",
             "message": "must contain at least 1 character",
         })));
     } else if count > 64 {
         return Err(HttpResponse::BadRequest().json(json!({
             "type": "E_AUTH",
-            "query_param": "username",
+            "param": "username",
             "message": "must contain no more than 64 characters",
         })));
     }
@@ -282,18 +290,54 @@ pub fn parse_b64(data: &[u8]) -> anyhow::Result<Vec<u8>> {
     Ok(res)
 }
 
-pub fn validate_password(password: &str, query_param_name: &str) -> Result<Vec<u8>, HttpResponse> {
+pub fn validate_password(password: &str, param_name: &str) -> Result<Vec<u8>, HttpResponse> {
     match parse_b64(password.as_bytes()) {
         Err(e) => Err(HttpResponse::BadRequest().json(json!({
             "type": "E_AUTH",
-            "query_param": query_param_name,
+            "param": param_name,
             "message": format!("invalid base64 password: {}", e),
         }))),
         Ok(o) => Ok(o),
     }
 }
 
-pub fn get_content_length(req: HttpRequest) -> Result<Option<u64>, HttpResponse> {
+fn required_header<'a>(req: &'a HttpRequest, name: &'static str) -> Result<&'a str, HttpResponse> {
+    match req.headers().get(name).map(|v| v.to_str()) {
+        Some(Ok(s)) => Ok(s),
+        _ => Err(HttpResponse::BadRequest().json(json!({
+            "type": "E_BAD_REQUEST",
+            "header_required": name,
+            "message": "the header is required and must be ASCII"
+        }))),
+    }
+}
+
+/// Reads a base64 auth key header (`AUTH_KEY_HEADER` or `NEW_AUTH_KEY_HEADER`).
+pub fn auth_key_header(req: &HttpRequest, name: &'static str) -> Result<String, HttpResponse> {
+    required_header(req, name).map(str::to_string)
+}
+
+/// Builds the policy credentials from `SERVER_PASS_HEADER` and the
+/// non-secret `server_ns` query parameter.
+pub fn policy_params(
+    req: &HttpRequest,
+    server_ns: Option<String>,
+) -> Result<PolicyParams, HttpResponse> {
+    let encoded = required_header(req, SERVER_PASS_HEADER)?;
+    match percent_decode_str(encoded).decode_utf8() {
+        Ok(server_pass) => Ok(PolicyParams {
+            server_pass: server_pass.into_owned(),
+            server_ns,
+        }),
+        Err(_) => Err(HttpResponse::BadRequest().json(json!({
+            "type": "E_BAD_REQUEST",
+            "header": SERVER_PASS_HEADER,
+            "message": "the header must be percent-encoded UTF-8"
+        }))),
+    }
+}
+
+pub fn get_content_length(req: &HttpRequest) -> Result<Option<u64>, HttpResponse> {
     let heads = req.headers();
     match (
         heads.get(header::CONTENT_LENGTH),

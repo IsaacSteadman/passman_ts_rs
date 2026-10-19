@@ -52,6 +52,19 @@ export async function deriveUserKeys(
   return { authKeyB64, encryptionKey };
 }
 
+/** Credentials go in headers rather than the URL so they stay out of server
+ *  and proxy logs. The server password is percent-encoded because header
+ *  values must be ASCII. */
+export function credentialHeaders(
+  authKeyB64: string,
+  serverPass: string,
+): Record<string, string> {
+  return {
+    "Passman-Auth-Key": authKeyB64,
+    "Passman-Server-Pass": encodeURIComponent(serverPass),
+  };
+}
+
 /** Reads server_pass and server_ns from the #server-access form. */
 export function readServerAccessParams(): {
   serverPass: string;
@@ -115,13 +128,13 @@ export function initLoginArea(
 
     const url = new URL("/pass-table", window.location.origin);
     url.searchParams.set("username", username);
-    url.searchParams.set("auth_key", authKeyB64);
-    url.searchParams.set("server_pass", serverPass);
     if (serverNs != null) url.searchParams.set("server_ns", serverNs);
 
     let response: Response;
     try {
-      response = await fetch(url.toString());
+      response = await fetch(url.toString(), {
+        headers: credentialHeaders(authKeyB64, serverPass),
+      });
     } catch (e) {
       errorPanel.textContent = `Network error: ${e}`;
       return;

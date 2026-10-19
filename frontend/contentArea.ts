@@ -1,5 +1,9 @@
 import type { LoginResult } from "./loginArea";
-import { deriveUserKeys, readServerAccessParams } from "./loginArea";
+import {
+  credentialHeaders,
+  deriveUserKeys,
+  readServerAccessParams,
+} from "./loginArea";
 import {
   type VaultRoot,
   type PassTableData,
@@ -73,12 +77,11 @@ export function initContentArea(
 
         const url = new URL("/pass-table", window.location.origin);
         url.searchParams.set("username", currentUsername);
-        url.searchParams.set("auth_key", currentAuthKeyB64);
-        url.searchParams.set("server_pass", currentServerPass);
         if (currentServerNs != null)
           url.searchParams.set("server_ns", currentServerNs);
 
-        const headers: HeadersInit = {
+        const headers: Record<string, string> = {
+          ...credentialHeaders(currentAuthKeyB64, currentServerPass),
           "Content-Type": "application/octet-stream",
           "Content-Length": String(blob.byteLength),
         };
@@ -132,12 +135,12 @@ export function initContentArea(
     try {
       const url = new URL("/pass-table", window.location.origin);
       url.searchParams.set("username", currentUsername);
-      url.searchParams.set("auth_key", currentAuthKeyB64);
-      url.searchParams.set("server_pass", currentServerPass);
       if (currentServerNs != null)
         url.searchParams.set("server_ns", currentServerNs);
 
-      const response = await fetch(url.toString());
+      const response = await fetch(url.toString(), {
+        headers: credentialHeaders(currentAuthKeyB64, currentServerPass),
+      });
       if (!response.ok) return `Refresh failed (${response.status})`;
 
       lastFetchTime = Date.now();
@@ -666,9 +669,6 @@ export function initContentArea(
     const { serverPass, serverNs } = readServerAccessParams();
     const url = new URL("/pass-table-new-pass", window.location.origin);
     url.searchParams.set("username", currentUsername);
-    url.searchParams.set("old_auth_key", oldAuthKeyB64);
-    url.searchParams.set("new_auth_key", newAuthKeyB64);
-    url.searchParams.set("server_pass", serverPass);
     if (serverNs != null) url.searchParams.set("server_ns", serverNs);
 
     chgPassStatus.textContent = "Saving…";
@@ -677,6 +677,8 @@ export function initContentArea(
       response = await fetch(url.toString(), {
         method: "PUT",
         headers: {
+          ...credentialHeaders(oldAuthKeyB64, serverPass),
+          "Passman-New-Auth-Key": newAuthKeyB64,
           "Content-Type": "application/octet-stream",
           "Content-Length": String(blob.byteLength),
           "If-Unmodified-Since": currentLastModified,

@@ -1,9 +1,6 @@
-use crate::{
-    routes::base::{
-        AppState, GetUser, GetWillMutUser, UserDataHeader, WritingFile, get_content_length,
-        validate_password,
-    },
-    server_policy::PolicyParams,
+use crate::routes::base::{
+    AUTH_KEY_HEADER, AppState, GetUser, GetWillMutUser, NEW_AUTH_KEY_HEADER, UserDataHeader,
+    WritingFile, auth_key_header, get_content_length, policy_params, validate_password,
 };
 use actix_web::{HttpRequest, HttpResponse, Responder, http::header, put, web};
 use futures_util::StreamExt;
@@ -13,11 +10,8 @@ use tokio::sync::OwnedRwLockReadGuard;
 
 #[derive(Debug, Deserialize)]
 struct PutPassTableNewPassParams {
-    #[serde(flatten)]
-    policy: PolicyParams,
     username: String,
-    old_auth_key: String,
-    new_auth_key: String,
+    server_ns: Option<String>,
 }
 
 #[put("/pass-table-new-pass")]
@@ -40,18 +34,28 @@ pub async fn route(
             "message": "the condition header is required to be specified"
         }));
     };
-    let content_length = match get_content_length(req) {
+    let content_length = match get_content_length(&req) {
         Err(e) => return e,
         Ok(o) => o,
     };
 
     let PutPassTableNewPassParams {
-        old_auth_key,
-        new_auth_key,
-        policy,
         username,
+        server_ns,
     } = query.into_inner();
-    let new_password = match validate_password(&new_auth_key, "new_auth_key") {
+    let policy = match policy_params(&req, server_ns) {
+        Err(e) => return e,
+        Ok(o) => o,
+    };
+    let old_auth_key = match auth_key_header(&req, AUTH_KEY_HEADER) {
+        Err(e) => return e,
+        Ok(o) => o,
+    };
+    let new_auth_key = match auth_key_header(&req, NEW_AUTH_KEY_HEADER) {
+        Err(e) => return e,
+        Ok(o) => o,
+    };
+    let new_password = match validate_password(&new_auth_key, NEW_AUTH_KEY_HEADER) {
         Err(e) => return e,
         Ok(o) => o,
     };
@@ -76,7 +80,7 @@ pub async fn route(
             },
         write_file_path,
     } = match app_state
-        .get_will_mut_user(&username, &old_auth_key, "old_auth_key")
+        .get_will_mut_user(&username, &old_auth_key, AUTH_KEY_HEADER)
         .await
     {
         Err(e) => return e,

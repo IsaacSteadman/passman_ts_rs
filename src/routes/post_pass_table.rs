@@ -1,9 +1,6 @@
-use crate::{
-    routes::base::{
-        AppState, UserDataHeader, WritingFile, get_content_length, validate_password,
-        validate_username,
-    },
-    server_policy::PolicyParams,
+use crate::routes::base::{
+    AUTH_KEY_HEADER, AppState, UserDataHeader, WritingFile, auth_key_header, get_content_length,
+    policy_params, validate_password, validate_username,
 };
 use actix_web::{HttpRequest, HttpResponse, Responder, post, web};
 use futures_util::StreamExt;
@@ -14,10 +11,8 @@ use tokio::sync::RwLock;
 
 #[derive(Debug, Deserialize)]
 struct PostPassTableParams {
-    #[serde(flatten)]
-    policy: PolicyParams,
     username: String,
-    auth_key: String,
+    server_ns: Option<String>,
 }
 
 #[post("/pass-table")]
@@ -29,22 +24,29 @@ pub async fn route(
 ) -> impl Responder {
     eprintln!("POST /pass-table\n  query = {query:?}");
 
-    let content_length = match get_content_length(req) {
+    let content_length = match get_content_length(&req) {
         Err(e) => return e,
         Ok(o) => o,
     };
 
     let PostPassTableParams {
-        auth_key,
-        policy,
         username,
+        server_ns,
     } = query.into_inner();
+    let policy = match policy_params(&req, server_ns) {
+        Err(e) => return e,
+        Ok(o) => o,
+    };
+    let auth_key = match auth_key_header(&req, AUTH_KEY_HEADER) {
+        Err(e) => return e,
+        Ok(o) => o,
+    };
 
     if let Err(e) = validate_username(&username) {
         return e;
     }
 
-    let password = match validate_password(&auth_key, "auth_key") {
+    let password = match validate_password(&auth_key, AUTH_KEY_HEADER) {
         Err(e) => return e,
         Ok(o) => o,
     };
@@ -65,7 +67,7 @@ pub async fn route(
     if user_path.is_file() || user_locks.contains_key(&username) {
         return HttpResponse::Conflict().json(json!({
             "type": "E_USER_EXISTS",
-            "query_param": "username",
+            "param": "username",
             "message": "user already exists"
         }));
     }
