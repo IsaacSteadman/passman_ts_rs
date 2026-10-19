@@ -725,6 +725,18 @@ export function initContentArea(
     currentLastModified = null;
     currentData = null;
     historyDetails = null;
+    lastFetchTime = 0;
+    // hiding is not enough: the decrypted vault would stay in the DOM
+    dataDiv.innerHTML = "";
+    statSpan.textContent = "";
+    document
+      .querySelectorAll(".pm-backdrop")
+      .forEach((modal) => modal.remove());
+    currentPassInput.value = "";
+    newPassChgInput.value = "";
+    confirmNewPassChgInput.value = "";
+    chgPassStatus.textContent = "";
+    changePassDetails.open = false;
     contentDiv.style.display = "none";
     onLogout();
   });

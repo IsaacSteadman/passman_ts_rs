@@ -10,9 +10,14 @@ import { type PassTableData, copyTextToClipboard } from "./PassTable";
 const DEFAULT_SYMBOLS = "!@#$%^&*()-_=+[]{}|;:',.<>?/`~\"\\";
 
 /** Sets up the passgen panel. `getTableData` is called each time to get the current live data. */
+export interface PassgenPanelHandle {
+  /** Forgets the generated password and the vault's table names (logout). */
+  clear(): void;
+}
+
 export function initPassgenPanel(
   getTableData: () => PassTableData[] | null,
-): void {
+): PassgenPanelHandle {
   const panel = document.querySelector("div#passgen-panel") as HTMLDivElement;
   const form = panel.querySelector("form")!;
 
@@ -311,4 +316,12 @@ export function initPassgenPanel(
     }
     activeDisplay.textContent = `Added to table "${tableName}".`;
   });
+
+  return {
+    clear(): void {
+      passwordOutput.value = "";
+      refreshTableSelect();
+      updateDerivedDisplay();
+    },
+  };
 }

@@ -187,6 +187,7 @@ export function initLoginArea(
       return;
     }
 
+    passwordInput.value = "";
     onLogin({
       data,
       lastModified,

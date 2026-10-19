@@ -46,12 +46,15 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   const contentHandle = initContentArea(contentDiv, () => {
     // onLogout — restore the auth card and ensure the Login tab is active
+    passgenHandle.clear();
     contentDiv.style.display = "none";
     loginDiv.style.display = "";
     if (authWrap) authWrap.style.display = "";
   });
 
-  initPassgenPanel(() => contentHandle.getCurrentData()?.tables ?? null);
+  const passgenHandle = initPassgenPanel(
+    () => contentHandle.getCurrentData()?.tables ?? null,
+  );
 
   initLoginArea(errorPanel, (result: LoginResult) => {
     if (authWrap) authWrap.style.display = "none";
@@ -149,6 +152,8 @@ document.addEventListener("DOMContentLoaded", async () => {
       return;
     }
 
+    regPasswordInput.value = "";
+    regConfirmInput.value = "";
     // Switch back to login with a success hint
     errorPanel.textContent = "Account created — please log in.";
     registerDiv.style.display = "none";
