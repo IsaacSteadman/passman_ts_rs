@@ -4,13 +4,13 @@ use crate::{
         validate_username,
     },
     server_policy::PolicyParams,
-    ur_dw_lock::{UpgradeError, UrDwLock},
 };
 use actix_web::{HttpRequest, HttpResponse, Responder, post, web};
 use futures_util::StreamExt;
 use serde::Deserialize;
 use serde_json::json;
 use std::sync::Arc;
+use tokio::sync::RwLock;
 
 #[derive(Debug, Deserialize)]
 struct PostPassTableParams {
@@ -59,15 +59,7 @@ pub async fn route(
         Ok(o) => o,
     };
 
-    let user_locks = match app_state.user_locks.read().await {
-        Ok(o) => o,
-        Err(ae) => {
-            eprintln!(
-                "AcquireError occured attempting to app_state.user_locks.read()\n  ae={ae:?}\n  username={username:?}"
-            );
-            return HttpResponse::InternalServerError().finish();
-        }
-    };
+    let user_locks = app_state.user_locks.read().await;
 
     let user_path = app_state.server_data_dir.join(&username);
     if user_path.is_file() || user_locks.contains_key(&username) {
@@ -78,32 +70,18 @@ pub async fn route(
         }));
     }
 
-    let mut user_locks = match user_locks.upgrade().await {
+    let mut user_locks = match app_state.user_locks.upgrade(user_locks).await {
         Ok(o) => o,
-        Err((UpgradeError::AcquireError(ae), _)) => {
-            eprintln!(
-                "AcquireError occured attempting to upgrade user_locks read to write\n  ae={ae:?}\n  username={username:?}"
-            );
-            return HttpResponse::InternalServerError().finish();
-        }
-        Err((UpgradeError::AlreadyUpgrading, _)) => {
+        Err(_) => {
             return HttpResponse::Conflict().json(json!({
                 "type": "E_AUTH_CONFLICT",
                 "message": "failed to upgrade to exlusive lock",
             }));
         }
     };
-    let new_lock = Arc::new(UrDwLock::new(()));
+    let new_lock = Arc::new(RwLock::new(()));
     user_locks.insert(username.clone(), Arc::clone(&new_lock));
-    let write_guard = match new_lock.write_owned().await {
-        Err(e) => {
-            eprintln!(
-                "AcquireError occured attempting to create user lock write guard\n  e={e:?}\n  username={username:?}"
-            );
-            return HttpResponse::InternalServerError().finish();
-        }
-        Ok(o) => o,
-    };
+    let write_guard = new_lock.write_owned().await;
     drop(user_locks);
 
     let udh = match UserDataHeader::from_password(&password, &app_state.argon2_params.make()).await

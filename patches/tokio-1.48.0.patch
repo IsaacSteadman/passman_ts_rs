@@ -1,0 +1,882 @@
+diff --git a/src/sync/batch_semaphore.rs b/src/sync/batch_semaphore.rs
+index b89a5a9..4ff9eb7 100644
+--- a/src/sync/batch_semaphore.rs
++++ b/src/sync/batch_semaphore.rs
+@@ -15,6 +15,13 @@
+ //! tasks are acquiring smaller numbers of permits. This means that in a
+ //! use-case like tokio's read-write lock, writers will not be starved by
+ //! readers.
++//!
++//! The one exception is [`Semaphore::acquire_priority`], which places its
++//! waiter ahead of every existing waiter and takes over any permits already
++//! assigned to the previous front of the queue. It exists for upgrading an
++//! `RwLock` read guard: the upgrading task already holds one permit, so if it
++//! queued behind a waiting writer, the writer would wait for that permit while
++//! the upgrade waited for the writer.
+ use crate::loom::cell::UnsafeCell;
+ use crate::loom::sync::atomic::AtomicUsize;
+ use crate::loom::sync::{Mutex, MutexGuard};
+@@ -73,6 +80,7 @@ pub(crate) struct Acquire<'a> {
+     semaphore: &'a Semaphore,
+     num_permits: usize,
+     queued: bool,
++    priority: bool,
+ }
+ 
+ /// An entry in the wait queue.
+@@ -83,6 +91,12 @@ struct Waiter {
+     /// the waiter, or a flag indicating that the waiter is not yet queued.
+     state: AtomicUsize,
+ 
++    /// The total number of permits requested by the waiter.
++    ///
++    /// `num_permits - state` is the number of permits already assigned to a
++    /// queued waiter.
++    num_permits: usize,
++
+     /// The waker to notify the task awaiting permits.
+     ///
+     /// # Safety
+@@ -298,6 +312,18 @@ impl Semaphore {
+         Acquire::new(self, num_permits)
+     }
+ 
++    /// Like [`acquire`](Self::acquire), but the waiter is served before every
++    /// waiter that is already queued, and takes over any permits that were
++    /// already assigned to the waiter previously at the front of the queue.
++    ///
++    /// Once queued, the waiter is an ordinary waiter: a later priority
++    /// acquire would be placed ahead of it.
++    pub(crate) fn acquire_priority(&self, num_permits: usize) -> Acquire<'_> {
++        let mut acquire = Acquire::new(self, num_permits);
++        acquire.priority = true;
++        acquire
++    }
++
+     /// Release `rem` permits to the semaphore's wait list, starting from the
+     /// end of the queue.
+     ///
+@@ -520,6 +546,85 @@ impl Semaphore {
+ 
+         Poll::Pending
+     }
++
++    /// The first poll of a priority acquire. See [`Semaphore::acquire_priority`].
++    ///
++    /// Subsequent polls go through `poll_acquire`, as for any queued waiter.
++    fn poll_acquire_priority(
++        &self,
++        cx: &mut Context<'_>,
++        num_permits: usize,
++        node: Pin<&mut Waiter>,
++    ) -> Poll<Result<(), AcquireError>> {
++        // Unlike `poll_acquire`, always lock the wait list: taking permits
++        // away from another waiter must not race with permits being assigned
++        // to it.
++        let mut waiters = self.waiters.lock();
++        if waiters.closed {
++            return Poll::Ready(Err(AcquireError::closed()));
++        }
++
++        // Take back the permits assigned to the waiter at the front of the
++        // queue. It is the only waiter that can hold any: `add_permits_locked`
++        // stops at the first waiter it cannot satisfy, and permits are only
++        // left in `self.permits` while the queue is empty, so a newly queued
++        // waiter can only take permits from there if it becomes the front.
++        let mut acquired = match waiters.queue.last() {
++            Some(front) => front.num_permits - front.state.swap(front.num_permits, AcqRel),
++            None => 0,
++        };
++
++        // Then take what is still needed from the semaphore.
++        let mut curr = self.permits.load(Acquire);
++        loop {
++            if curr & Self::CLOSED == Self::CLOSED {
++                return Poll::Ready(Err(AcquireError::closed()));
++            }
++            let take = cmp::min(
++                curr >> Self::PERMIT_SHIFT,
++                num_permits.saturating_sub(acquired),
++            );
++            let next = curr - (take << Self::PERMIT_SHIFT);
++            match self.permits.compare_exchange(curr, next, AcqRel, Acquire) {
++                Ok(_) => {
++                    acquired += take;
++                    break;
++                }
++                Err(actual) => curr = actual,
++            }
++        }
++
++        #[cfg(all(tokio_unstable, feature = "tracing"))]
++        self.resource_span.in_scope(|| {
++            tracing::trace!(
++                target: "runtime::resource::state_update",
++                permits = acquired,
++                permits.op = "sub",
++            )
++        });
++
++        if node.assign_permits(&mut acquired) {
++            // Any surplus taken from the previous front waiter goes back to it.
++            self.add_permits_locked(acquired, waiters);
++            return Poll::Ready(Ok(()));
++        }
++        assert_eq!(acquired, 0);
++
++        node.waker.with_mut(|waker| {
++            // Safety: the wait list is locked, so we may modify the waker.
++            let waker = unsafe { &mut *waker };
++            *waker = Some(cx.waker().clone());
++        });
++
++        let node = unsafe {
++            let node = Pin::into_inner_unchecked(node) as *mut _;
++            NonNull::new_unchecked(node)
++        };
++        // Waiters are served from the back of the queue.
++        waiters.queue.push_back(node);
++
++        Poll::Pending
++    }
+ }
+ 
+ impl fmt::Debug for Semaphore {
+@@ -538,6 +643,7 @@ impl Waiter {
+         Waiter {
+             waker: UnsafeCell::new(None),
+             state: AtomicUsize::new(num_permits),
++            num_permits,
+             pointers: linked_list::Pointers::new(),
+             #[cfg(all(tokio_unstable, feature = "tracing"))]
+             ctx,
+@@ -585,7 +691,7 @@ impl Future for Acquire<'_> {
+         #[cfg(all(tokio_unstable, feature = "tracing"))]
+         let _async_op_poll_span = self.node.ctx.async_op_poll_span.clone().entered();
+ 
+-        let (node, semaphore, needed, queued) = self.project();
++        let (node, semaphore, needed, queued, priority) = self.project();
+ 
+         // First, ensure the current task has enough budget to proceed.
+         #[cfg(all(tokio_unstable, feature = "tracing"))]
+@@ -597,7 +703,12 @@ impl Future for Acquire<'_> {
+         #[cfg(not(all(tokio_unstable, feature = "tracing")))]
+         let coop = ready!(crate::task::coop::poll_proceed(cx));
+ 
+-        let result = match semaphore.poll_acquire(cx, needed, node, *queued) {
++        let poll = if priority && !*queued {
++            semaphore.poll_acquire_priority(cx, needed, node)
++        } else {
++            semaphore.poll_acquire(cx, needed, node, *queued)
++        };
++        let result = match poll {
+             Poll::Pending => {
+                 *queued = true;
+                 Poll::Pending
+@@ -626,6 +737,7 @@ impl<'a> Acquire<'a> {
+             semaphore,
+             num_permits,
+             queued: false,
++            priority: false,
+         };
+ 
+         #[cfg(all(tokio_unstable, feature = "tracing"))]
+@@ -659,11 +771,12 @@ impl<'a> Acquire<'a> {
+                 semaphore,
+                 num_permits,
+                 queued: false,
++                priority: false,
+             }
+         });
+     }
+ 
+-    fn project(self: Pin<&mut Self>) -> (Pin<&mut Waiter>, &Semaphore, usize, &mut bool) {
++    fn project(self: Pin<&mut Self>) -> (Pin<&mut Waiter>, &Semaphore, usize, &mut bool, bool) {
+         fn is_unpin<T: Unpin>() {}
+         unsafe {
+             // Safety: all fields other than `node` are `Unpin`
+@@ -671,6 +784,7 @@ impl<'a> Acquire<'a> {
+             is_unpin::<&Semaphore>();
+             is_unpin::<&mut bool>();
+             is_unpin::<usize>();
++            is_unpin::<bool>();
+ 
+             let this = self.get_unchecked_mut();
+             (
+@@ -678,6 +792,7 @@ impl<'a> Acquire<'a> {
+                 this.semaphore,
+                 this.num_permits,
+                 &mut this.queued,
++                this.priority,
+             )
+         }
+     }
+diff --git a/src/sync/rwlock.rs b/src/sync/rwlock.rs
+index c8a35db..ec30680 100644
+--- a/src/sync/rwlock.rs
++++ b/src/sync/rwlock.rs
+@@ -1,3 +1,4 @@
++use crate::loom::sync::atomic::{AtomicBool, Ordering};
+ use crate::sync::batch_semaphore::{Semaphore, TryAcquireError};
+ use crate::sync::mutex::TryLockError;
+ #[cfg(all(tokio_unstable, feature = "tracing"))]
+@@ -5,6 +6,7 @@ use crate::util::trace;
+ use std::cell::UnsafeCell;
+ use std::marker;
+ use std::marker::PhantomData;
++use std::ptr;
+ use std::sync::Arc;
+ 
+ pub(crate) mod owned_read_guard;
+@@ -92,6 +94,9 @@ pub struct RwLock<T: ?Sized> {
+     // maximum number of concurrent readers
+     mr: u32,
+ 
++    // set while a read guard is being upgraded; see `RwLock::upgrade`
++    upgrading: AtomicBool,
++
+     //semaphore to coordinate read and write access to T
+     s: Semaphore,
+ 
+@@ -190,6 +195,16 @@ where
+ {
+ }
+ 
++/// Clears `RwLock::upgrading` when dropped, including when an upgrade future is
++/// cancelled.
++struct UpgradeInProgress<'a>(&'a AtomicBool);
++
++impl Drop for UpgradeInProgress<'_> {
++    fn drop(&mut self) {
++        self.0.store(false, Ordering::Release);
++    }
++}
++
+ impl<T: ?Sized> RwLock<T> {
+     /// Creates a new instance of an `RwLock<T>` which is unlocked.
+     ///
+@@ -246,6 +261,7 @@ impl<T: ?Sized> RwLock<T> {
+ 
+         RwLock {
+             mr: MAX_READS,
++            upgrading: AtomicBool::new(false),
+             c: UnsafeCell::new(value),
+             s,
+             #[cfg(all(tokio_unstable, feature = "tracing"))]
+@@ -319,6 +335,7 @@ impl<T: ?Sized> RwLock<T> {
+ 
+         RwLock {
+             mr: max_reads,
++            upgrading: AtomicBool::new(false),
+             c: UnsafeCell::new(value),
+             s,
+             #[cfg(all(tokio_unstable, feature = "tracing"))]
+@@ -350,6 +367,7 @@ impl<T: ?Sized> RwLock<T> {
+     {
+         RwLock {
+             mr: MAX_READS,
++            upgrading: AtomicBool::new(false),
+             c: UnsafeCell::new(value),
+             s: Semaphore::const_new(MAX_READS as usize),
+             #[cfg(all(tokio_unstable, feature = "tracing"))]
+@@ -376,6 +394,7 @@ impl<T: ?Sized> RwLock<T> {
+ 
+         RwLock {
+             mr: max_reads,
++            upgrading: AtomicBool::new(false),
+             c: UnsafeCell::new(value),
+             s: Semaphore::const_new(max_reads as usize),
+             #[cfg(all(tokio_unstable, feature = "tracing"))]
+@@ -952,6 +971,106 @@ impl<T: ?Sized> RwLock<T> {
+         guard
+     }
+ 
++    /// Upgrades a read guard of this `RwLock` to exclusive write access,
++    /// without releasing its read access in the meantime.
++    ///
++    /// The calling task will yield until every other reader has released its
++    /// read access. The upgrade is served ahead of any task already waiting
++    /// for the lock, including writers, so nothing else can acquire the lock
++    /// between the read guard and the returned write guard.
++    ///
++    /// Only one upgrade can be in progress at a time: two upgrading tasks
++    /// would each wait for the other's read access forever. If another
++    /// upgrade of this lock is in progress, this returns the read guard
++    /// unchanged as `Err` without waiting. The caller should then drop it
++    /// (allowing the other upgrade to finish) before trying again.
++    ///
++    /// The upgrade will never complete if the calling task holds any other
++    /// read guard of this lock.
++    ///
++    /// # Cancel safety
++    ///
++    /// If the returned future is dropped before completing, the read guard is
++    /// dropped as well, releasing its read access.
++    ///
++    /// # Panics
++    ///
++    /// Panics if `guard` was not acquired from this `RwLock`.
++    ///
++    /// # Examples
++    ///
++    /// ```
++    /// use tokio::sync::RwLock;
++    ///
++    /// # #[tokio::main(flavor = "current_thread")]
++    /// # async fn main() {
++    /// let lock = RwLock::new(Vec::new());
++    ///
++    /// let guard = lock.read().await;
++    /// if guard.is_empty() {
++    ///     let mut guard = lock.upgrade(guard).await.expect("no other upgrade in progress");
++    ///     // No other task can have modified the data since it was read.
++    ///     guard.push(1);
++    /// }
++    /// # }
++    /// ```
++    pub async fn upgrade<'a>(
++        &'a self,
++        guard: RwLockReadGuard<'a, T>,
++    ) -> Result<RwLockWriteGuard<'a, T>, RwLockReadGuard<'a, T>> {
++        assert!(
++            ptr::eq(guard.s, &self.s),
++            "RwLock::upgrade called with a read guard of a different RwLock"
++        );
++        let Some(_upgrading) = self.start_upgrade() else {
++            return Err(guard);
++        };
++        self.s
++            .acquire_priority(self.mr as usize - 1)
++            .await
++            .unwrap_or_else(|_| {
++                // The semaphore was closed. but, we never explicitly close it, and we have a
++                // handle to it through the guard, which means that this can never happen.
++                unreachable!()
++            });
++        // The read guard's permit becomes one of the write guard's permits.
++        guard.skip_drop();
++
++        let guard = RwLockWriteGuard {
++            permits_acquired: self.mr,
++            s: &self.s,
++            data: self.c.get(),
++            marker: marker::PhantomData,
++            #[cfg(all(tokio_unstable, feature = "tracing"))]
++            resource_span: self.resource_span.clone(),
++        };
++
++        #[cfg(all(tokio_unstable, feature = "tracing"))]
++        self.resource_span.in_scope(|| {
++            tracing::trace!(
++            target: "runtime::resource::state_update",
++            current_readers = 1,
++            current_readers.op = "sub",
++            );
++            tracing::trace!(
++            target: "runtime::resource::state_update",
++            write_locked = true,
++            write_locked.op = "override",
++            )
++        });
++
++        Ok(guard)
++    }
++
++    /// Marks an upgrade of this lock as in progress until the returned value
++    /// is dropped, or returns `None` if one already is.
++    fn start_upgrade(&self) -> Option<UpgradeInProgress<'_>> {
++        self.upgrading
++            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
++            .ok()
++            .map(|_| UpgradeInProgress(&self.upgrading))
++    }
++
+     /// Attempts to acquire this `RwLock` with exclusive write access.
+     ///
+     /// If the access couldn't be acquired immediately, returns [`TryLockError`].
+diff --git a/src/sync/rwlock/owned_read_guard.rs b/src/sync/rwlock/owned_read_guard.rs
+index 019f610..cb83d0e 100644
+--- a/src/sync/rwlock/owned_read_guard.rs
++++ b/src/sync/rwlock/owned_read_guard.rs
+@@ -1,4 +1,4 @@
+-use crate::sync::rwlock::RwLock;
++use crate::sync::rwlock::{OwnedRwLockWriteGuard, RwLock};
+ use std::marker::PhantomData;
+ use std::sync::Arc;
+ use std::{fmt, mem, ops, ptr};
+@@ -164,6 +164,93 @@ impl<T: ?Sized, U: ?Sized> OwnedRwLockReadGuard<T, U> {
+     pub fn rwlock(this: &Self) -> &Arc<RwLock<T>> {
+         &this.lock
+     }
++
++    /// Upgrades this read guard to exclusive write access to the whole
++    /// `RwLock`, without releasing its read access in the meantime.
++    ///
++    /// This is identical to [`RwLock::upgrade`], except that it takes and
++    /// returns owned guards. The guard may have been [mapped](Self::map); the
++    /// returned write guard always gives access to the entire `T`.
++    ///
++    /// If another upgrade of the same lock is in progress, returns the read
++    /// guard unchanged as `Err` without waiting.
++    ///
++    /// This is an associated function that needs to be used as
++    /// `OwnedRwLockReadGuard::upgrade(...)`. A method would interfere with
++    /// methods of the same name on the contents of the locked data.
++    ///
++    /// # Cancel safety
++    ///
++    /// If the returned future is dropped before completing, the read guard is
++    /// dropped as well, releasing its read access.
++    ///
++    /// # Examples
++    ///
++    /// ```
++    /// use std::sync::Arc;
++    /// use tokio::sync::{OwnedRwLockReadGuard, RwLock};
++    ///
++    /// # #[tokio::main(flavor = "current_thread")]
++    /// # async fn main() {
++    /// let lock = Arc::new(RwLock::new(1));
++    ///
++    /// let guard = lock.clone().read_owned().await;
++    /// let mut guard = OwnedRwLockReadGuard::upgrade(guard)
++    ///     .await
++    ///     .expect("no other upgrade in progress");
++    /// *guard += 1;
++    /// drop(guard);
++    ///
++    /// assert_eq!(*lock.read().await, 2);
++    /// # }
++    /// ```
++    ///
++    /// [`RwLock::upgrade`]: crate::sync::RwLock::upgrade
++    pub async fn upgrade(this: Self) -> Result<OwnedRwLockWriteGuard<T>, Self> {
++        let lock = this.lock.clone();
++        {
++            let Some(_upgrading) = lock.start_upgrade() else {
++                return Err(this);
++            };
++            lock.s
++                .acquire_priority(lock.mr as usize - 1)
++                .await
++                .unwrap_or_else(|_| {
++                    // The semaphore was closed. but, we never explicitly close it, and we have a
++                    // handle to it through the Arc, which means that this can never happen.
++                    unreachable!()
++                });
++        }
++        // The read guard's permit becomes one of the write guard's permits.
++        let this = this.skip_drop();
++
++        let guard = OwnedRwLockWriteGuard {
++            permits_acquired: lock.mr,
++            data: lock.c.get(),
++            lock,
++            _p: PhantomData,
++            #[cfg(all(tokio_unstable, feature = "tracing"))]
++            resource_span: this.resource_span,
++        };
++        #[cfg(not(all(tokio_unstable, feature = "tracing")))]
++        drop(this);
++
++        #[cfg(all(tokio_unstable, feature = "tracing"))]
++        guard.resource_span.in_scope(|| {
++            tracing::trace!(
++            target: "runtime::resource::state_update",
++            current_readers = 1,
++            current_readers.op = "sub",
++            );
++            tracing::trace!(
++            target: "runtime::resource::state_update",
++            write_locked = true,
++            write_locked.op = "override",
++            )
++        });
++
++        Ok(guard)
++    }
+ }
+ 
+ impl<T: ?Sized, U: ?Sized> ops::Deref for OwnedRwLockReadGuard<T, U> {
+diff --git a/src/sync/rwlock/read_guard.rs b/src/sync/rwlock/read_guard.rs
+index a3a5ba8..17fb336 100644
+--- a/src/sync/rwlock/read_guard.rs
++++ b/src/sync/rwlock/read_guard.rs
+@@ -23,7 +23,7 @@ pub struct RwLockReadGuard<'a, T: ?Sized> {
+ }
+ 
+ #[allow(dead_code)] // Unused fields are still used in Drop.
+-struct Inner<'a, T: ?Sized> {
++pub(super) struct Inner<'a, T: ?Sized> {
+     #[cfg(all(tokio_unstable, feature = "tracing"))]
+     resource_span: tracing::Span,
+     s: &'a Semaphore,
+@@ -31,7 +31,7 @@ struct Inner<'a, T: ?Sized> {
+ }
+ 
+ impl<'a, T: ?Sized> RwLockReadGuard<'a, T> {
+-    fn skip_drop(self) -> Inner<'a, T> {
++    pub(super) fn skip_drop(self) -> Inner<'a, T> {
+         let me = mem::ManuallyDrop::new(self);
+         // SAFETY: This duplicates the values in every field of the guard, then
+         // forgets the originals, so in the end no value is duplicated.
+diff --git a/src/sync/tests/loom_rwlock.rs b/src/sync/tests/loom_rwlock.rs
+index 4b5cc7e..2ee6370 100644
+--- a/src/sync/tests/loom_rwlock.rs
++++ b/src/sync/tests/loom_rwlock.rs
+@@ -103,3 +103,105 @@ fn downgrade() {
+         assert_eq!(*block_on(lock.read()), 2);
+     });
+ }
++
++// An upgrade racing with a writer that queues behind the upgrading read
++// permit: both must complete, and the upgrade must see no intervening write.
++#[test]
++fn upgrade_with_concurrent_writer() {
++    loom::model(|| {
++        let rwlock = Arc::new(RwLock::<u32>::new(0));
++
++        let rwclone = rwlock.clone();
++        let t1 = thread::spawn(move || {
++            block_on(async {
++                let guard = rwclone.read().await;
++                let seen = *guard;
++                let mut guard = rwclone
++                    .upgrade(guard)
++                    .await
++                    .expect("only one upgrader, so the upgrade cannot be refused");
++                assert_eq!(seen, *guard);
++                *guard += 1;
++            });
++        });
++
++        let rwclone = rwlock.clone();
++        let t2 = thread::spawn(move || {
++            block_on(async {
++                *rwclone.write().await += 10;
++            });
++        });
++
++        t1.join().expect("upgrading thread should not panic");
++        t2.join().expect("writing thread should not panic");
++        assert_eq!(11, *block_on(rwlock.read()));
++    });
++}
++
++// An owned upgrade racing with a plain reader and a writer.
++#[test]
++fn upgrade_owned_with_reader_and_writer() {
++    loom::model(|| {
++        let rwlock = Arc::new(RwLock::<u32>::new(0));
++
++        let rwclone = rwlock.clone();
++        let t1 = thread::spawn(move || {
++            block_on(async {
++                let guard = rwclone.read_owned().await;
++                let mut guard = OwnedRwLockReadGuard::upgrade(guard)
++                    .await
++                    .expect("only one upgrader, so the upgrade cannot be refused");
++                *guard += 1;
++            });
++        });
++
++        let rwclone = rwlock.clone();
++        let t2 = thread::spawn(move || {
++            block_on(async {
++                *rwclone.write().await += 10;
++            });
++        });
++
++        let value = *block_on(rwlock.read());
++        assert!([0, 1, 10, 11].contains(&value));
++
++        t1.join().expect("upgrading thread should not panic");
++        t2.join().expect("writing thread should not panic");
++        assert_eq!(11, *block_on(rwlock.read()));
++    });
++}
++
++// Two tasks upgrading at once: one may be refused, in which case it drops its
++// read guard and retries. Both increments must land.
++#[test]
++fn concurrent_upgrades() {
++    loom::model(|| {
++        let rwlock = Arc::new(RwLock::<u32>::new(0));
++
++        let upgrader = |rwlock: Arc<RwLock<u32>>| {
++            thread::spawn(move || {
++                block_on(async {
++                    loop {
++                        let guard = rwlock.read().await;
++                        match rwlock.upgrade(guard).await {
++                            Ok(mut guard) => {
++                                *guard += 1;
++                                break;
++                            }
++                            Err(guard) => {
++                                drop(guard);
++                                thread::yield_now();
++                            }
++                        }
++                    }
++                });
++            })
++        };
++        let t1 = upgrader(rwlock.clone());
++        let t2 = upgrader(rwlock.clone());
++
++        t1.join().expect("thread 1 should not panic");
++        t2.join().expect("thread 2 should not panic");
++        assert_eq!(2, *block_on(rwlock.read()));
++    });
++}
+diff --git a/src/util/linked_list.rs b/src/util/linked_list.rs
+index 3650f87..59fcb08 100644
+--- a/src/util/linked_list.rs
++++ b/src/util/linked_list.rs
+@@ -137,6 +137,28 @@ impl<L: Link> LinkedList<L, L::Target> {
+         }
+     }
+ 
++    /// Adds an element last in the list.
++    pub(crate) fn push_back(&mut self, val: L::Handle) {
++        // The value should not be dropped, it is being inserted into the list
++        let val = ManuallyDrop::new(val);
++        let ptr = L::as_raw(&val);
++        assert_ne!(self.tail, Some(ptr));
++        unsafe {
++            L::pointers(ptr).as_mut().set_prev(self.tail);
++            L::pointers(ptr).as_mut().set_next(None);
++
++            if let Some(tail) = self.tail {
++                L::pointers(tail).as_mut().set_next(Some(ptr));
++            }
++
++            self.tail = Some(ptr);
++
++            if self.head.is_none() {
++                self.head = Some(ptr);
++            }
++        }
++    }
++
+     /// Removes the first element from a list and returns it, or None if it is
+     /// empty.
+     pub(crate) fn pop_front(&mut self) -> Option<L::Handle> {
+@@ -588,6 +610,28 @@ pub(crate) mod tests {
+         assert!(list.pop_back().is_none());
+     }
+ 
++    #[test]
++    fn push_back_is_popped_first() {
++        let a = entry(5);
++        let b = entry(7);
++        let c = entry(31);
++
++        let mut list = LinkedList::<&Entry, <&Entry as Link>::Target>::new();
++
++        list.push_back(a.as_ref());
++        assert_ptr_eq!(a, list.head);
++        assert_ptr_eq!(a, list.tail);
++
++        list.push_front(b.as_ref());
++        list.push_back(c.as_ref());
++
++        assert_eq!([31, 5, 7].to_vec(), collect_list(&mut list));
++        assert!(list.is_empty());
++        assert_clean!(a);
++        assert_clean!(b);
++        assert_clean!(c);
++    }
++
+     #[test]
+     fn remove_by_address() {
+         let a = entry(5);
+diff --git a/tests/sync_rwlock.rs b/tests/sync_rwlock.rs
+index 5a58b49..5c6e590 100644
+--- a/tests/sync_rwlock.rs
++++ b/tests/sync_rwlock.rs
+@@ -13,7 +13,9 @@ use std::task::Poll;
+ 
+ use futures::future::FutureExt;
+ 
+-use tokio::sync::{RwLock, RwLockWriteGuard};
++use std::sync::Arc;
++
++use tokio::sync::{OwnedRwLockReadGuard, RwLock, RwLockWriteGuard};
+ use tokio_test::task::spawn;
+ use tokio_test::{assert_pending, assert_ready};
+ 
+@@ -330,3 +332,172 @@ async fn try_downgrade_map() {
+     // Ensure they're equal, as we return the original value
+     assert_eq!(&*read_guard1 as *const _, &*read_guard2 as *const _);
+ }
++
++#[test]
++fn upgrade_uncontested() {
++    let rwlock = RwLock::new(1);
++    let g = assert_ready!(spawn(rwlock.read()).poll());
++    let mut w = assert_ready!(spawn(rwlock.upgrade(g)).poll()).unwrap();
++    *w += 1;
++    // the write guard holds every permit
++    assert!(rwlock.try_read().is_err());
++    drop(w);
++    assert_eq!(*rwlock.try_read().unwrap(), 2);
++
++    // a lock with a single reader needs no further permits to upgrade
++    let rwlock = RwLock::with_max_readers(1, 1);
++    let g = assert_ready!(spawn(rwlock.read()).poll());
++    let w = assert_ready!(spawn(rwlock.upgrade(g)).poll()).unwrap();
++    drop(w);
++    assert!(rwlock.try_write().is_ok());
++}
++
++#[test]
++fn upgrade_waits_for_other_readers() {
++    let rwlock = RwLock::new(1);
++    let g1 = assert_ready!(spawn(rwlock.read()).poll());
++    let g2 = assert_ready!(spawn(rwlock.read()).poll());
++
++    let mut upgrade = spawn(rwlock.upgrade(g1));
++    assert_pending!(upgrade.poll());
++    drop(g2);
++    assert!(upgrade.is_woken());
++    let _w = assert_ready!(upgrade.poll()).unwrap();
++}
++
++// An upgrade must not queue behind a writer that is waiting for the upgrading
++// guard's own read permit.
++#[test]
++fn upgrade_ahead_of_queued_writer() {
++    let rwlock = RwLock::new(1);
++    let g1 = assert_ready!(spawn(rwlock.read()).poll());
++    let g2 = assert_ready!(spawn(rwlock.read()).poll());
++
++    let mut write = spawn(rwlock.write());
++    assert_pending!(write.poll());
++
++    let mut upgrade = spawn(rwlock.upgrade(g1));
++    assert_pending!(upgrade.poll());
++
++    drop(g2);
++    assert!(upgrade.is_woken());
++    let mut w = assert_ready!(upgrade.poll()).unwrap();
++    assert_pending!(write.poll());
++    *w += 1;
++    drop(w);
++
++    assert!(write.is_woken());
++    let mut w = assert_ready!(write.poll());
++    assert_eq!(*w, 2);
++    *w += 1;
++    drop(w);
++    assert_eq!(*rwlock.try_read().unwrap(), 3);
++}
++
++// Readers queued after a writer stay queued behind the upgrade and the writer.
++#[test]
++fn upgrade_ahead_of_queued_readers() {
++    let rwlock = RwLock::new(1);
++    let g1 = assert_ready!(spawn(rwlock.read()).poll());
++    let g2 = assert_ready!(spawn(rwlock.read()).poll());
++
++    let mut write = spawn(rwlock.write());
++    assert_pending!(write.poll());
++    let mut read = spawn(rwlock.read());
++    assert_pending!(read.poll());
++
++    let mut upgrade = spawn(rwlock.upgrade(g1));
++    assert_pending!(upgrade.poll());
++    drop(g2);
++    let w = assert_ready!(upgrade.poll()).unwrap();
++    assert_pending!(write.poll());
++    assert_pending!(read.poll());
++
++    drop(w);
++    let w = assert_ready!(write.poll());
++    assert_pending!(read.poll());
++    drop(w);
++    let _r = assert_ready!(read.poll());
++}
++
++// Two concurrent upgrades would wait for each other's read permit, so the
++// second is refused immediately.
++#[test]
++fn concurrent_upgrade_refused() {
++    let rwlock = RwLock::new(1);
++    let g1 = assert_ready!(spawn(rwlock.read()).poll());
++    let g2 = assert_ready!(spawn(rwlock.read()).poll());
++
++    let mut upgrade1 = spawn(rwlock.upgrade(g1));
++    assert_pending!(upgrade1.poll());
++
++    let g2 = assert_ready!(spawn(rwlock.upgrade(g2)).poll()).unwrap_err();
++    assert_pending!(upgrade1.poll());
++    drop(g2);
++    let w = assert_ready!(upgrade1.poll()).unwrap();
++    drop(w);
++
++    // once the first upgrade is done, upgrading is possible again
++    let g = assert_ready!(spawn(rwlock.read()).poll());
++    let _w = assert_ready!(spawn(rwlock.upgrade(g)).poll()).unwrap();
++}
++
++// Dropping a pending upgrade releases the read guard, returns the permits it
++// took from a queued writer, and allows later upgrades.
++#[test]
++fn cancelled_upgrade_releases_everything() {
++    let rwlock = RwLock::new(1);
++    let g1 = assert_ready!(spawn(rwlock.read()).poll());
++    let g2 = assert_ready!(spawn(rwlock.read()).poll());
++
++    let mut write = spawn(rwlock.write());
++    assert_pending!(write.poll());
++
++    let mut upgrade = spawn(rwlock.upgrade(g1));
++    assert_pending!(upgrade.poll());
++    drop(upgrade);
++    assert_pending!(write.poll());
++
++    drop(g2);
++    assert!(write.is_woken());
++    let w = assert_ready!(write.poll());
++    drop(w);
++
++    let g = assert_ready!(spawn(rwlock.read()).poll());
++    let _w = assert_ready!(spawn(rwlock.upgrade(g)).poll()).unwrap();
++}
++
++#[test]
++#[should_panic(expected = "read guard of a different RwLock")]
++fn upgrade_guard_of_other_lock_panics() {
++    let rwlock1 = RwLock::new(1);
++    let rwlock2 = RwLock::new(2);
++    let g = assert_ready!(spawn(rwlock1.read()).poll());
++    let _ = spawn(rwlock2.upgrade(g)).poll();
++}
++
++#[test]
++fn upgrade_owned_mapped() {
++    let rwlock = Arc::new(RwLock::new((1, 2)));
++    let g1 = assert_ready!(spawn(rwlock.clone().read_owned()).poll());
++    let g1 = OwnedRwLockReadGuard::map(g1, |v| &v.1);
++    let g2 = assert_ready!(spawn(rwlock.clone().read_owned()).poll());
++
++    let mut write = spawn(rwlock.clone().write_owned());
++    assert_pending!(write.poll());
++
++    let mut upgrade = spawn(OwnedRwLockReadGuard::upgrade(g1));
++    assert_pending!(upgrade.poll());
++    let g2 = assert_ready!(spawn(OwnedRwLockReadGuard::upgrade(g2)).poll()).unwrap_err();
++    drop(g2);
++
++    let mut w = assert_ready!(upgrade.poll()).unwrap();
++    w.0 += 10;
++    drop(w);
++    let w = assert_ready!(write.poll());
++    assert_eq!(*w, (11, 2));
++    drop(w);
++    drop(write);
++    drop(upgrade);
++    assert_eq!(Arc::strong_count(&rwlock), 1);
++}

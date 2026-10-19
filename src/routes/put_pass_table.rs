@@ -1,12 +1,12 @@
 use crate::{
     routes::base::{AppState, GetUser, GetWillMutUser, WritingFile, get_content_length},
     server_policy::PolicyParams,
-    ur_dw_lock::UpgradeError,
 };
 use actix_web::{HttpRequest, HttpResponse, Responder, http::header, put, web};
 use futures_util::StreamExt;
 use serde::Deserialize;
 use serde_json::json;
+use tokio::sync::OwnedRwLockReadGuard;
 
 #[derive(Debug, Deserialize)]
 struct PutPassTableParams {
@@ -105,14 +105,10 @@ pub async fn route(
             "message": "the resource has been modified since the specified time"
         }));
     }
-    let write_guard = match read_guard.upgrade().await {
-        Err((UpgradeError::AcquireError(ae), _)) => {
-            eprintln!("AcquireError occured attempting to get user data {ae:?}");
-            return HttpResponse::InternalServerError().finish();
-        }
-        Err((UpgradeError::AlreadyUpgrading, _)) => {
+    let write_guard = match OwnedRwLockReadGuard::upgrade(read_guard).await {
+        Err(_) => {
             eprintln!(
-                "UpgradeError::AlreadyUpgrading occured attempting to upgrade user lock from read to write\n  username={username:?}"
+                "another upgrade of the user lock was in progress when attempting to upgrade from read to write\n  username={username:?}"
             );
             return HttpResponse::Conflict().json(json!({
                 "type": "E_AUTH_CONFLICT",

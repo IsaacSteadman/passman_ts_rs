@@ -1,13 +1,13 @@
-use crate::{
-    server_policy::PolicyStorage,
-    ur_dw_lock::{UpgradeError, UrDwLock, UrDwLockReadOwnedGuard, UrDwLockWriteOwnedGuard},
-};
+use crate::server_policy::PolicyStorage;
 use actix_web::{HttpRequest, HttpResponse, http::header, web};
 use rand::{TryRngCore, rngs::OsRng};
 use serde_json::json;
 use std::{collections::HashMap, fs::Metadata, path::PathBuf, sync::Arc};
 use subtle::ConstantTimeEq;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock},
+};
 
 pub use passman_crypto::{Argon2Params, HASH_SIZE};
 
@@ -54,7 +54,7 @@ pub type UserT = ();
 
 pub struct GetUser<'a> {
     pub user_path: PathBuf,
-    pub read_guard: UrDwLockReadOwnedGuard<()>,
+    pub read_guard: OwnedRwLockReadGuard<UserT>,
     pub read_file: tokio::fs::File,
     pub metadata: Metadata,
     pub udh: UserDataHeader,
@@ -70,7 +70,7 @@ pub struct AppState {
     pub policies_and_config: Arc<PolicyStorage>,
     pub server_data_dir: PathBuf,
     pub argon2_params: Argon2Params,
-    pub user_locks: UrDwLock<HashMap<String, Arc<UrDwLock<UserT>>>>,
+    pub user_locks: RwLock<HashMap<String, Arc<RwLock<UserT>>>>,
 }
 
 impl AppState {
@@ -82,15 +82,7 @@ impl AppState {
     ) -> Result<GetUser<'_>, HttpResponse> {
         validate_username(&username)?;
         let password = validate_password(password, password_query_param_name)?;
-        let user_locks = match self.user_locks.read().await {
-            Ok(o) => o,
-            Err(ae) => {
-                eprintln!(
-                    "AcquireError occured attempting to self.user_locks.read()\n  ae={ae:?}\n  username={username:?}"
-                );
-                return Err(HttpResponse::InternalServerError().finish());
-            }
-        };
+        let user_locks = self.user_locks.read().await;
         let user_path = self.server_data_dir.join(username);
         let user_lock = if let Some(x) = user_locks.get(username) {
             let user_lock = x.clone();
@@ -98,14 +90,8 @@ impl AppState {
             user_lock
         } else {
             if user_path.is_file() {
-                match user_locks.upgrade().await {
-                    Err((UpgradeError::AcquireError(ae), _)) => {
-                        eprintln!(
-                            "AcquireError occured attempting to user_locks.upgrade()\n  ae={ae:?}\n  username={username:?}"
-                        );
-                        return Err(HttpResponse::InternalServerError().finish());
-                    }
-                    Err((UpgradeError::AlreadyUpgrading, _)) => {
+                match self.user_locks.upgrade(user_locks).await {
+                    Err(_) => {
                         return Err(HttpResponse::Conflict().json(json!({
                             "type": "E_AUTH_CONFLICT",
                             "query_params": ["username", password_query_param_name],
@@ -113,7 +99,7 @@ impl AppState {
                         })));
                     }
                     Ok(mut user_locks) => {
-                        let res = Arc::new(UrDwLock::new(()));
+                        let res = Arc::new(RwLock::new(()));
                         user_locks.insert(username.to_string(), res.clone());
                         res
                     }
@@ -126,15 +112,7 @@ impl AppState {
                 })));
             }
         };
-        let read_guard = match user_lock.read_owned().await {
-            Err(ae) => {
-                eprintln!(
-                    "AcquireError occured attempting to user_lock.read()\n  ae={ae:?}\n  username={username:?}"
-                );
-                return Err(HttpResponse::InternalServerError().finish());
-            }
-            Ok(o) => o,
-        };
+        let read_guard = user_lock.read_owned().await;
         let mut read_file = match tokio::fs::File::open(&user_path).await {
             Err(e) => {
                 eprintln!(
@@ -377,7 +355,7 @@ type CleanupTarget = (String, web::Data<AppState>);
 struct WritingFileInner {
     wf: tokio::fs::File,
     write_file_path: PathBuf,
-    guard: UrDwLockWriteOwnedGuard<UserT>,
+    guard: OwnedRwLockWriteGuard<UserT>,
     replace_target_path: PathBuf,
     cleanup_target: Option<CleanupTarget>,
 }
@@ -387,7 +365,7 @@ pub struct WritingFile(Option<WritingFileInner>);
 impl WritingFile {
     pub async fn new(
         username: &str,
-        guard: UrDwLockWriteOwnedGuard<UserT>,
+        guard: OwnedRwLockWriteGuard<UserT>,
         write_file_path: PathBuf,
         replace_target_path: PathBuf,
         cleanup_target: Option<CleanupTarget>,
@@ -500,7 +478,7 @@ impl Drop for WritingFile {
 
 struct ReadyToReplaceInner {
     write_file_path: PathBuf,
-    guard: UrDwLockWriteOwnedGuard<UserT>,
+    guard: OwnedRwLockWriteGuard<UserT>,
     replace_target_path: PathBuf,
     cleanup_target: Option<CleanupTarget>,
 }
@@ -556,16 +534,7 @@ impl Drop for ReadyToReplace {
                     );
                 }
                 if let Some((username, app_state)) = cleanup_target {
-                    match app_state.user_locks.write().await {
-                        Err(ae) => {
-                            eprintln!(
-                                "AcquireError occured attempting to cleanup user lock after failed replace\n  ae={ae:?}\n  path={write_file_path:?}\n  recommendation: restart application"
-                            );
-                        }
-                        Ok(mut o) => {
-                            o.remove(&username);
-                        }
-                    }
+                    app_state.user_locks.write().await.remove(&username);
                 }
                 drop(guard);
             });
@@ -574,7 +543,7 @@ impl Drop for ReadyToReplace {
 }
 
 pub struct Replaced {
-    guard: UrDwLockWriteOwnedGuard<UserT>,
+    guard: OwnedRwLockWriteGuard<UserT>,
     replace_target_path: PathBuf,
 }
 

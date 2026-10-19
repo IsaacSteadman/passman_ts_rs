@@ -5,15 +5,14 @@ use crate::{
         get_pass_table, post_pass_table, put_pass_table, put_pass_table_new_pass,
     },
     server_policy::PolicyStorage,
-    ur_dw_lock::UrDwLock,
 };
 use actix_web::{App, HttpServer, web};
 use std::{collections::HashMap, path::PathBuf};
+use tokio::sync::RwLock;
 
 mod config;
 mod routes;
 mod server_policy;
-mod ur_dw_lock;
 
 #[actix_web::main]
 async fn main() -> anyhow::Result<()> {
@@ -37,7 +36,7 @@ async fn main() -> anyhow::Result<()> {
         argon2_params: Argon2Params::new()?,
         policies_and_config,
         server_data_dir: base_dir.join("server_data"),
-        user_locks: UrDwLock::new(HashMap::new()),
+        user_locks: RwLock::new(HashMap::new()),
     });
     let frontend_mode = web::Data::new(if let Ok(url) = std::env::var("FRONTEND_DEV_SERVER") {
         println!("Proxying frontend requests to {url}");
@@ -138,7 +137,7 @@ mod tests {
             argon2_params: Argon2Params::new().unwrap(),
             policies_and_config,
             server_data_dir: tmpdir.join("server_data"),
-            user_locks: UrDwLock::new(HashMap::new()),
+            user_locks: RwLock::new(HashMap::new()),
         })
     }
 

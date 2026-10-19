@@ -1,5 +1,6 @@
 [workspace]
 members = [".", "passman_crypto"]
+exclude = [".patched-crates"]
 resolver = "2"
 
 [package]
@@ -33,3 +34,8 @@ ts-rs = { version = "11.0.0", optional = true }
 [dev-dependencies]
 sha2 = "0.10"
 tempfile = "3"
+
+# tokio with `RwLock::upgrade` (patches/tokio-1.48.0.patch);
+# run scripts/patch-crates.sh before building to create this directory
+[patch.crates-io]
+tokio = { path = ".patched-crates/tokio-1.48.0" }

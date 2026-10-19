@@ -1,9 +1,13 @@
-use crate::{config::ServerConfig, ur_dw_lock::UrDwLock};
+use crate::config::ServerConfig;
 use actix_web::HttpResponse;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{collections::HashMap, path::Path, sync::Arc};
-use tokio::{fs, sync::Notify, task::JoinHandle};
+use tokio::{
+    fs,
+    sync::{Notify, RwLock},
+    task::JoinHandle,
+};
 
 // ── On-disk data types (unchanged) ──────────────────────────────────────────
 
@@ -68,21 +72,15 @@ impl Drop for RollbackHandle {
         let storage = self.policy_storage.clone();
         let key = std::mem::take(&mut self.key);
         tokio::spawn(async move {
-            match storage.policies.write().await {
-                Err(e) => {
-                    eprintln!("Failed to acquire policy write lock for rollback: {}", e);
-                }
-                Ok(mut writer) => {
-                    if let Some(PolicyConfig {
-                        inner: InnerPolicyConfig::LimitedPolicy { data, .. },
-                        ..
-                    }) = writer.get_mut(&key)
-                    {
-                        if let Some(new_num_accounts) = data.num_accounts.checked_sub(1) {
-                            data.num_accounts = new_num_accounts;
-                            storage.notify.notify_waiters();
-                        }
-                    }
+            let mut writer = storage.policies.write().await;
+            if let Some(PolicyConfig {
+                inner: InnerPolicyConfig::LimitedPolicy { data, .. },
+                ..
+            }) = writer.get_mut(&key)
+            {
+                if let Some(new_num_accounts) = data.num_accounts.checked_sub(1) {
+                    data.num_accounts = new_num_accounts;
+                    storage.notify.notify_waiters();
                 }
             }
         });
@@ -171,7 +169,7 @@ impl LenReadChecker {
 type Policies = HashMap<String, PolicyConfig>;
 
 pub struct PolicyStorage {
-    policies: UrDwLock<Policies>,
+    policies: RwLock<Policies>,
     notify: Notify,
     config: ServerConfig,
 }
@@ -201,7 +199,7 @@ impl PolicyStorage {
             }
         };
         let res = Arc::new(Self {
-            policies: UrDwLock::new(match serde_json::from_slice(&vec_u8) {
+            policies: RwLock::new(match serde_json::from_slice(&vec_u8) {
                 Ok(o) => o,
                 Err(e) => {
                     anyhow::bail!("error parsing {server_policy_path:?}: {e:?}");
@@ -217,11 +215,11 @@ impl PolicyStorage {
                 loop {
                     aself.notify.notified().await;
                     fs::write("./policies.json", {
-                        let reader = aself.policies.read().await?;
+                        let reader = aself.policies.read().await;
                         if aself.config.pretty_policies_json.is_some() {
-                            serde_json::to_vec_pretty(reader.as_ref())?
+                            serde_json::to_vec_pretty(&*reader)?
                         } else {
-                            serde_json::to_vec(reader.as_ref())?
+                            serde_json::to_vec(&*reader)?
                         }
                     })
                     .await?;
@@ -235,16 +233,7 @@ impl PolicyStorage {
         params: PolicyParams,
     ) -> Result<LenReadChecker, HttpResponse> {
         if let Some(ns) = params.server_ns {
-            let reader = match self.policies.read().await {
-                Ok(o) => o,
-                _ => {
-                    return Err(HttpResponse::Conflict().json(json!({
-                        "type": "E_POLICY_CONFLICT",
-                        "action": "read_account",
-                        "message": "action was conflicted, retry recommended"
-                    })));
-                }
-            };
+            let reader = self.policies.read().await;
             let PolicyConfig { password, inner } = match reader.get(&ns) {
                 None => {
                     return Err(HttpResponse::BadRequest().json(json!({
@@ -298,16 +287,7 @@ impl PolicyStorage {
         params: PolicyParams,
     ) -> Result<LenAccumChecker, HttpResponse> {
         if let Some(ns) = params.server_ns {
-            let reader = match self.policies.read().await {
-                Ok(o) => o,
-                _ => {
-                    return Err(HttpResponse::Conflict().json(json!({
-                        "type": "E_POLICY_CONFLICT",
-                        "action": "read_account",
-                        "message": "action was conflicted, retry recommended"
-                    })));
-                }
-            };
+            let reader = self.policies.read().await;
             let PolicyConfig { password, .. } = match reader.get(&ns) {
                 None => {
                     return Err(HttpResponse::BadRequest().json(json!({
@@ -321,10 +301,10 @@ impl PolicyStorage {
             if subtle::ConstantTimeEq::ct_eq(password.as_bytes(), params.server_pass.as_bytes())
                 .into()
             {
-                let mut writer = match reader.upgrade().await {
+                let mut writer = match self.policies.upgrade(reader).await {
                     Ok(o) => o,
-                    Err((ue, _)) => {
-                        eprintln!("Failed to upgrade reader lock: {ue:?}");
+                    Err(_) => {
+                        eprintln!("Failed to upgrade reader lock: another upgrade was in progress");
                         return Err(HttpResponse::Conflict().json(json!({
                             "type": "E_POLICY_CONFLICT",
                             "action": "read_account",
@@ -405,16 +385,7 @@ impl PolicyStorage {
         params: PolicyParams,
     ) -> Result<LenAccumChecker, HttpResponse> {
         if let Some(ns) = params.server_ns {
-            let reader = match self.policies.read().await {
-                Ok(o) => o,
-                _ => {
-                    return Err(HttpResponse::Conflict().json(json!({
-                        "type": "E_POLICY_CONFLICT",
-                        "action": "read_account",
-                        "message": "action was conflicted, retry recommended"
-                    })));
-                }
-            };
+            let reader = self.policies.read().await;
             let PolicyConfig { password, inner } = match reader.get(&ns) {
                 None => {
                     return Err(HttpResponse::BadRequest().json(json!({
