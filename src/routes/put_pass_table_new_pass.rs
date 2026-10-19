@@ -1,6 +1,6 @@
 use crate::routes::base::{
     AUTH_KEY_HEADER, AppState, GetUser, GetWillMutUser, NEW_AUTH_KEY_HEADER, UserDataHeader,
-    WritingFile, auth_key_header, get_content_length, policy_params, validate_password,
+    WritingFile, auth_key_header, get_content_length, http_date, policy_params, validate_password,
 };
 use actix_web::{HttpRequest, HttpResponse, Responder, http::header, put, web};
 use futures_util::StreamExt;
@@ -87,7 +87,7 @@ pub async fn route(
         Ok(o) => o,
     };
     drop(read_file);
-    let last_modified = header::HttpDate::from(match metadata.modified() {
+    let last_modified = http_date(match metadata.modified() {
         Ok(o) => o,
         Err(e) => {
             eprintln!(
@@ -128,6 +128,7 @@ pub async fn route(
         Ok(o) => o,
     };
     let mut accum_total_len = 0u64;
+    let replaced;
 
     if let Some(total_len) = content_length {
         if let Err(e) = len_checker.check_len(total_len).await {
@@ -181,9 +182,10 @@ pub async fn route(
                 "message": "request payload is smaller than specified Content-Length"
             }));
         }
-        if let Err(e) = wf.close().replace().await {
-            return e;
-        }
+        replaced = match wf.close().replace().await {
+            Err(e) => return e,
+            Ok(o) => o,
+        };
     } else {
         if let Err(e) = len_checker.check_len(accum_total_len).await {
             return e;
@@ -227,12 +229,18 @@ pub async fn route(
                 }
             }
         }
-        if let Err(e) = wf.close().replace().await {
-            return e;
-        }
+        replaced = match wf.close().replace().await {
+            Err(e) => return e,
+            Ok(o) => o,
+        };
     }
-    HttpResponse::Ok().json(json!({
-      "type": "SUCCESS",
-      "message": "successfully saved password table"
+    // the client sends this back as If-Unmodified-Since on its next save
+    let mut resp = HttpResponse::Ok();
+    if let Some(lm) = replaced.last_modified {
+        resp.insert_header(header::LastModified(lm));
+    }
+    resp.json(json!({
+        "type": "SUCCESS",
+        "message": "successfully saved password table"
     }))
 }

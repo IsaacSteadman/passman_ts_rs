@@ -1,6 +1,6 @@
 use crate::routes::base::{
     AUTH_KEY_HEADER, AppState, GetUser, GetWillMutUser, WritingFile, auth_key_header,
-    get_content_length, policy_params,
+    get_content_length, http_date, policy_params,
 };
 use actix_web::{HttpRequest, HttpResponse, Responder, http::header, put, web};
 use futures_util::StreamExt;
@@ -78,31 +78,18 @@ pub async fn route(
         Ok(o) => o,
     };
     drop(read_file);
-    let last_modified = {
-        let sys_time = match metadata.modified() {
-            Ok(o) => o,
-            Err(e) => {
-                eprintln!(
-                    "Error occured attempting to fetch modified\n  metadata={metadata:?}\n  username={username:?}\n  path={user_path:?}\n  e={e:?}"
-                );
-                return HttpResponse::BadRequest().json(json!({
-                    "type": "E_USER_READ",
-                    "message": "Failed to read user file metadata last modified"
-                }));
-            }
-        };
-        // Truncate to second precision: HTTP dates have no sub-second resolution.
-        // A raw SystemTime with nanoseconds compares as "newer" than the parsed
-        // If-Unmodified-Since (which has only second precision), causing a
-        // spurious 412 on every save even when nothing has changed.
-        let secs = sys_time
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        header::HttpDate::from(
-            std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs),
-        )
-    };
+    let last_modified = http_date(match metadata.modified() {
+        Ok(o) => o,
+        Err(e) => {
+            eprintln!(
+                "Error occured attempting to fetch modified\n  metadata={metadata:?}\n  username={username:?}\n  path={user_path:?}\n  e={e:?}"
+            );
+            return HttpResponse::BadRequest().json(json!({
+                "type": "E_USER_READ",
+                "message": "Failed to read user file metadata last modified"
+            }));
+        }
+    });
     if last_modified > if_unmodified_since {
         return HttpResponse::PreconditionFailed().json(json!({
             "type": "E_PRECONDITION_FAILED",
@@ -122,8 +109,8 @@ pub async fn route(
         }
         Ok(o) => o,
     };
-    let user_path_for_metadata = user_path.clone();
     let mut accum_total_len = 0u64;
+    let replaced;
 
     if let Some(total_len) = content_length {
         if let Err(e) = len_checker.check_len(total_len).await {
@@ -177,9 +164,10 @@ pub async fn route(
                 "message": "request payload is smaller than specified Content-Length"
             }));
         }
-        if let Err(e) = wf.close().replace().await {
-            return e;
-        }
+        replaced = match wf.close().replace().await {
+            Err(e) => return e,
+            Ok(o) => o,
+        };
     } else {
         if let Err(e) = len_checker.check_len(accum_total_len).await {
             return e;
@@ -223,27 +211,14 @@ pub async fn route(
                 }
             }
         }
-        if let Err(e) = wf.close().replace().await {
-            return e;
-        }
+        replaced = match wf.close().replace().await {
+            Err(e) => return e,
+            Ok(o) => o,
+        };
     }
-    // Re-read the written file's mtime (truncated to seconds) so the client
-    // can use it as If-Unmodified-Since on the next save.
-    let new_last_modified = tokio::fs::metadata(&user_path_for_metadata)
-        .await
-        .ok()
-        .and_then(|m| m.modified().ok())
-        .map(|t| {
-            let secs = t
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
-            header::HttpDate::from(
-                std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs),
-            )
-        });
+    // the client sends this back as If-Unmodified-Since on its next save
     let mut resp = HttpResponse::Ok();
-    if let Some(lm) = new_last_modified {
+    if let Some(lm) = replaced.last_modified {
         resp.insert_header(header::LastModified(lm));
     }
     resp.json(json!({

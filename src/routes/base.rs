@@ -3,7 +3,13 @@ use actix_web::{HttpRequest, HttpResponse, http::header, web};
 use percent_encoding::percent_decode_str;
 use rand::{TryRngCore, rngs::OsRng};
 use serde_json::json;
-use std::{collections::HashMap, fs::Metadata, path::PathBuf, sync::Arc};
+use std::{
+    collections::HashMap,
+    fs::Metadata,
+    path::PathBuf,
+    sync::Arc,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 use subtle::ConstantTimeEq;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -301,6 +307,16 @@ pub fn validate_password(password: &str, param_name: &str) -> Result<Vec<u8>, Ht
     }
 }
 
+/// HTTP dates have whole-second precision, so file mtimes are truncated to
+/// match the `Last-Modified` value a client sends back as `If-Unmodified-Since`.
+pub fn http_date(time: SystemTime) -> header::HttpDate {
+    let secs = time
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    header::HttpDate::from(UNIX_EPOCH + Duration::from_secs(secs))
+}
+
 fn required_header<'a>(req: &'a HttpRequest, name: &'static str) -> Result<&'a str, HttpResponse> {
     match req.headers().get(name).map(|v| v.to_str()) {
         Some(Ok(s)) => Ok(s),
@@ -562,6 +578,17 @@ impl ReadyToReplace {
                 write_file_path,
                 ..
             } = inner;
+            // read while still holding the write lock (rename keeps the mtime),
+            // so this is the version this request wrote, not a later one
+            let last_modified = match wf.metadata().await.and_then(|m| m.modified()) {
+                Ok(o) => Some(http_date(o)),
+                Err(e) => {
+                    eprintln!(
+                        "Error occured attempting to fetch modified of write file\n  e={e:?}\n  path={write_file_path:?}"
+                    );
+                    None
+                }
+            };
             drop(wf);
             match tokio::fs::rename(&write_file_path, &replace_target_path).await {
                 Err(e) => {
@@ -576,6 +603,7 @@ impl ReadyToReplace {
                 _ => Ok(Replaced {
                     guard,
                     replace_target_path,
+                    last_modified,
                 }),
             }
         } else {
@@ -614,6 +642,8 @@ impl Drop for ReadyToReplace {
 pub struct Replaced {
     guard: OwnedRwLockWriteGuard<UserT>,
     replace_target_path: PathBuf,
+    /// `None` if the mtime could not be read
+    pub last_modified: Option<header::HttpDate>,
 }
 
 #[cfg(test)]

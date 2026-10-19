@@ -1,5 +1,5 @@
 use crate::routes::base::{
-    AUTH_KEY_HEADER, AppState, GetUser, UserDataHeader, auth_key_header, policy_params,
+    AUTH_KEY_HEADER, AppState, GetUser, UserDataHeader, auth_key_header, http_date, policy_params,
 };
 use actix_web::{HttpRequest, HttpResponse, Responder, get, http::header, web};
 use serde::Deserialize;
@@ -64,7 +64,7 @@ pub async fn route(
         }
         Some(s) => s,
     };
-    let last_modified = header::HttpDate::from(match metadata.modified() {
+    let last_modified = http_date(match metadata.modified() {
         Ok(o) => o,
         Err(e) => {
             eprintln!(
