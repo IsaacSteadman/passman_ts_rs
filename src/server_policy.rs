@@ -244,7 +244,14 @@ impl PolicyStorage {
             }
         };
         let tmp_path = self.path.with_extension("json.tmp");
-        let mut f = fs::File::create(&tmp_path).await?;
+        // policy passwords are in this file, so keep it private to the service account
+        let mut f = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&tmp_path)
+            .await?;
         f.write_all(&data).await?;
         f.sync_all().await?;
         drop(f);

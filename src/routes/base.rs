@@ -370,7 +370,14 @@ impl WritingFile {
         replace_target_path: PathBuf,
         cleanup_target: Option<CleanupTarget>,
     ) -> Result<Self, HttpResponse> {
-        let wf = match tokio::fs::File::create(&write_file_path).await {
+        let wf = match tokio::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&write_file_path)
+            .await
+        {
             Err(e) => {
                 eprintln!(
                     "Error occured attempting to create write file\n  e={e:?}\n  username={username:?}\n  path={write_file_path:?}"

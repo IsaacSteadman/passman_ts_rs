@@ -7,7 +7,7 @@ use crate::{
     server_policy::PolicyStorage,
 };
 use actix_web::{App, HttpServer, web};
-use std::{collections::HashMap, path::PathBuf};
+use std::{collections::HashMap, os::unix::fs::PermissionsExt, path::PathBuf};
 use tokio::sync::RwLock;
 
 mod config;
@@ -32,11 +32,19 @@ async fn main() -> anyhow::Result<()> {
         };
     let (policies_and_config, join_handle) = PolicyStorage::new(&base_dir, config.clone()).await?;
     let policy_storage = policies_and_config.clone();
-    tokio::fs::create_dir_all(base_dir.join("server_data")).await?;
+    // holds the vaults and password hashes, so only the service account may
+    // list or open it (set_permissions also fixes a directory created earlier)
+    let server_data_dir = base_dir.join("server_data");
+    tokio::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&server_data_dir)
+        .await?;
+    tokio::fs::set_permissions(&server_data_dir, std::fs::Permissions::from_mode(0o700)).await?;
     let app_state = web::Data::new(AppState {
         argon2_params: Argon2Params::new()?,
         policies_and_config,
-        server_data_dir: base_dir.join("server_data"),
+        server_data_dir,
         user_locks: RwLock::new(HashMap::new()),
     });
     let frontend_mode = web::Data::new(if let Ok(url) = std::env::var("FRONTEND_DEV_SERVER") {
@@ -200,6 +208,32 @@ mod tests {
             "Login failed with status {}",
             resp.status()
         );
+    }
+
+    /// A vault holds ciphertext plus the password hash, so it must not be
+    /// readable by other local users whatever the umask is.
+    #[actix_web::test]
+    async fn registered_vault_file_is_private() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let state = make_test_app(tmpdir.path()).await;
+        let app = init_app!(state);
+
+        let auth_key = derive_client_auth_key("dave", "secret");
+        let req = test::TestRequest::post()
+            .uri(&format!(
+                "/pass-table?username=dave&auth_key={auth_key}&server_pass=testpass"
+            ))
+            .insert_header(("Content-Length", "64"))
+            .set_payload(vec![0u8; 64])
+            .to_request();
+        let resp: actix_web::dev::ServiceResponse = test::call_service(&app, req).await;
+        assert_eq!(resp.status().as_u16(), 201);
+
+        let mode = std::fs::metadata(tmpdir.path().join("server_data/dave"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
     }
 
     /// Registering the same username twice must return 409 Conflict.
