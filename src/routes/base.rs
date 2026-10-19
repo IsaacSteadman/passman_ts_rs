@@ -394,14 +394,15 @@ impl WritingFile {
     pub fn close(&mut self) -> ReadyToReplace {
         ReadyToReplace(
             if let Some(WritingFileInner {
+                wf,
                 guard,
                 replace_target_path,
                 write_file_path,
                 cleanup_target,
-                ..
             }) = self.0.take()
             {
                 Some(ReadyToReplaceInner {
+                    wf,
                     write_file_path,
                     guard,
                     replace_target_path,
@@ -477,6 +478,7 @@ impl Drop for WritingFile {
 }
 
 struct ReadyToReplaceInner {
+    wf: tokio::fs::File,
     write_file_path: PathBuf,
     guard: OwnedRwLockWriteGuard<UserT>,
     replace_target_path: PathBuf,
@@ -487,13 +489,29 @@ pub struct ReadyToReplace(Option<ReadyToReplaceInner>);
 
 impl ReadyToReplace {
     pub async fn replace(&mut self) -> Result<Replaced, HttpResponse> {
-        if let Some(ReadyToReplaceInner {
-            guard,
-            replace_target_path,
-            write_file_path,
-            ..
-        }) = self.0.take()
-        {
+        if let Some(inner) = self.0.take() {
+            // waits for tokio's in-flight background write, then flushes to
+            // disk, so the renamed file is complete before the lock is released
+            if let Err(e) = inner.wf.sync_all().await {
+                eprintln!(
+                    "Error occured attempting to sync write file\n  e={e:?}\n  path={:?}",
+                    inner.write_file_path
+                );
+                // put it back so Drop removes the temporary file
+                self.0 = Some(inner);
+                return Err(HttpResponse::InternalServerError().json(json!({
+                    "type": "E_USER_WRITE",
+                    "message": "Failed to write data to user file"
+                })));
+            }
+            let ReadyToReplaceInner {
+                wf,
+                guard,
+                replace_target_path,
+                write_file_path,
+                ..
+            } = inner;
+            drop(wf);
             match tokio::fs::rename(&write_file_path, &replace_target_path).await {
                 Err(e) => {
                     eprintln!(

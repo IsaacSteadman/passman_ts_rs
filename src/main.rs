@@ -31,6 +31,7 @@ async fn main() -> anyhow::Result<()> {
             }
         };
     let (policies_and_config, join_handle) = PolicyStorage::new(&base_dir, config.clone()).await?;
+    let policy_storage = policies_and_config.clone();
     tokio::fs::create_dir_all(base_dir.join("server_data")).await?;
     let app_state = web::Data::new(AppState {
         argon2_params: Argon2Params::new()?,
@@ -60,6 +61,9 @@ async fn main() -> anyhow::Result<()> {
     .run()
     .await?;
     join_handle.abort();
+    let _ = join_handle.await;
+    // persist any change the save task had not picked up yet
+    policy_storage.save().await?;
     Ok(())
 }
 

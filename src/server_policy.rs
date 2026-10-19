@@ -2,9 +2,14 @@ use crate::config::ServerConfig;
 use actix_web::HttpResponse;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::{collections::HashMap, path::Path, sync::Arc};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 use tokio::{
     fs,
+    io::AsyncWriteExt,
     sync::{Notify, RwLock},
     task::JoinHandle,
 };
@@ -80,7 +85,7 @@ impl Drop for RollbackHandle {
             {
                 if let Some(new_num_accounts) = data.num_accounts.checked_sub(1) {
                     data.num_accounts = new_num_accounts;
-                    storage.notify.notify_waiters();
+                    storage.notify.notify_one();
                 }
             }
         });
@@ -170,8 +175,11 @@ type Policies = HashMap<String, PolicyConfig>;
 
 pub struct PolicyStorage {
     policies: RwLock<Policies>,
+    /// Wakes the save task; `notify_one` keeps a permit if the task is busy
+    /// saving, so a change made during a save is not lost.
     notify: Notify,
     config: ServerConfig,
+    path: PathBuf,
 }
 
 #[derive(Debug, Deserialize)]
@@ -190,7 +198,7 @@ impl PolicyStorage {
     pub async fn new(
         base_dir: &Path,
         config: ServerConfig,
-    ) -> anyhow::Result<(Arc<Self>, JoinHandle<anyhow::Result<()>>)> {
+    ) -> anyhow::Result<(Arc<Self>, JoinHandle<()>)> {
         let server_policy_path = base_dir.join("policies.json");
         let vec_u8: Vec<u8> = match fs::read(&server_policy_path).await {
             Ok(o) => o,
@@ -207,6 +215,7 @@ impl PolicyStorage {
             }),
             notify: Notify::new(),
             config,
+            path: server_policy_path,
         });
         let aself = res.clone();
         Ok((
@@ -214,18 +223,33 @@ impl PolicyStorage {
             tokio::spawn(async move {
                 loop {
                     aself.notify.notified().await;
-                    fs::write("./policies.json", {
-                        let reader = aself.policies.read().await;
-                        if aself.config.pretty_policies_json.is_some() {
-                            serde_json::to_vec_pretty(&*reader)?
-                        } else {
-                            serde_json::to_vec(&*reader)?
-                        }
-                    })
-                    .await?;
+                    if let Err(e) = aself.save().await {
+                        eprintln!("Error occured attempting to save policies\n  e={e:?}");
+                    }
                 }
             }),
         ))
+    }
+
+    /// Writes the policies to a temporary file, flushes it to disk, then
+    /// renames it over `policies.json`, so a crash mid-save leaves the old
+    /// file intact.
+    pub async fn save(&self) -> anyhow::Result<()> {
+        let data = {
+            let reader = self.policies.read().await;
+            if self.config.pretty_policies_json.is_some() {
+                serde_json::to_vec_pretty(&*reader)?
+            } else {
+                serde_json::to_vec(&*reader)?
+            }
+        };
+        let tmp_path = self.path.with_extension("json.tmp");
+        let mut f = fs::File::create(&tmp_path).await?;
+        f.write_all(&data).await?;
+        f.sync_all().await?;
+        drop(f);
+        fs::rename(&tmp_path, &self.path).await?;
+        Ok(())
     }
 
     pub async fn read_account_server_policy_auth(
@@ -343,7 +367,7 @@ impl PolicyStorage {
                             })))
                         } else {
                             data.num_accounts += 1;
-                            self.notify.notify_waiters();
+                            self.notify.notify_one();
 
                             Ok(LenAccumChecker::Limited {
                                 action: "create_account".to_string(),
@@ -513,5 +537,33 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn policy_changes_are_saved_to_base_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = limited_storage(dir.path()).await;
+        let mut checker =
+            match storage.clone().create_account_hook_accum_len_auth(ns_params()).await {
+                Ok(o) => o,
+                Err(_) => panic!("account creation should be allowed"),
+            };
+        checker.commit();
+        let path = dir.path().join("policies.json");
+        let saved_num_accounts = || {
+            let saved: Policies = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            match &saved["ns"].inner {
+                InnerPolicyConfig::LimitedPolicy { data } => data.num_accounts,
+                _ => unreachable!(),
+            }
+        };
+        for _ in 0..200 {
+            if saved_num_accounts() == 1 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(saved_num_accounts(), 1);
+        assert!(!dir.path().join("policies.json.tmp").exists());
     }
 }
