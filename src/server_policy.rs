@@ -66,7 +66,7 @@ impl RollbackHandle {
 
 impl Drop for RollbackHandle {
     fn drop(&mut self) {
-        if !self.committed {
+        if self.committed {
             return;
         }
         let storage = self.policy_storage.clone();
@@ -434,5 +434,84 @@ impl PolicyStorage {
                 "message": "unrecognized server_ns or server_pass"
             })))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn limited_storage(dir: &Path) -> Arc<PolicyStorage> {
+        std::fs::write(
+            dir.join("policies.json"),
+            r#"{"ns":{"Password":"pw","PolicyType":"LIMITED_POLICY","MaxAccounts":1,"NumAccounts":0,"MaxDataSize":1024}}"#,
+        )
+        .unwrap();
+        let config = ServerConfig {
+            port: 0,
+            cors: false,
+            debug: false,
+            pretty_policies_json: None,
+            server_access_password: "root".to_string(),
+        };
+        PolicyStorage::new(dir, config).await.unwrap().0
+    }
+
+    fn ns_params() -> PolicyParams {
+        PolicyParams {
+            server_pass: "pw".to_string(),
+            server_ns: Some("ns".to_string()),
+        }
+    }
+
+    async fn num_accounts(storage: &PolicyStorage) -> u32 {
+        match &storage.policies.read().await["ns"].inner {
+            InnerPolicyConfig::LimitedPolicy { data } => data.num_accounts,
+            _ => unreachable!(),
+        }
+    }
+
+    /// Lets the rollback task spawned by `RollbackHandle::drop` run.
+    async fn settle() {
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn uncommitted_account_creation_is_rolled_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = limited_storage(dir.path()).await;
+        let checker = match storage.clone().create_account_hook_accum_len_auth(ns_params()).await {
+            Ok(o) => o,
+            Err(_) => panic!("account creation should be allowed"),
+        };
+        assert_eq!(num_accounts(&storage).await, 1);
+        drop(checker);
+        settle().await;
+        assert_eq!(num_accounts(&storage).await, 0);
+    }
+
+    #[tokio::test]
+    async fn committed_account_creation_is_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = limited_storage(dir.path()).await;
+        let mut checker =
+            match storage.clone().create_account_hook_accum_len_auth(ns_params()).await {
+                Ok(o) => o,
+                Err(_) => panic!("account creation should be allowed"),
+            };
+        checker.commit();
+        drop(checker);
+        settle().await;
+        assert_eq!(num_accounts(&storage).await, 1);
+        // MaxAccounts is 1, so the slot is now used up
+        assert!(
+            storage
+                .clone()
+                .create_account_hook_accum_len_auth(ns_params())
+                .await
+                .is_err()
+        );
     }
 }
