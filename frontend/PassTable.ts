@@ -209,20 +209,47 @@ function renderTextAreaEdit(td: HTMLTableCellElement, data: string) {
   td.appendChild(input);
 }
 
-function validateUrl(url: string): string | null {
-  // first check for empty string and return error saying non-empty is expected
-  if (!url) return "URL cannot be empty";
-  // then check that it starts with http:// or https:// to catch common mistakes, and also because URLs without a scheme are not universally supported across browsers when used as href
-  if (!url.startsWith("http://") && !url.startsWith("https://")) {
-    return "URL must start with http:// or https://";
+// A link is clickable inside the unlocked app, so schemes that run code
+// (javascript:, data:, …) must never be saved or rendered as a link.
+const ALLOWED_LINK_SCHEMES = [
+  "http:",
+  "https:",
+  "mailto:",
+  "ftp:",
+  "sftp:",
+  "ftps:",
+  "tel:",
+  "sms:",
+];
+
+/** The scheme the browser would navigate with, or null if `url` won't parse.
+ *  Uses the URL parser rather than a prefix check because the parser ignores
+ *  case and strips leading control characters, exactly as a click would. */
+function linkScheme(url: string): string | null {
+  try {
+    return new URL(url).protocol;
+  } catch {
+    return null;
   }
+}
+
+function isAllowedLinkUrl(url: string): boolean {
+  const scheme = linkScheme(url);
+  return scheme != null && ALLOWED_LINK_SCHEMES.includes(scheme);
+}
+
+function validateUrl(url: string): string | null {
+  // empty means "no link" (new cells start empty)
+  if (!url) return null;
   if (/\s/.test(url)) {
     return "URL cannot contain whitespace";
   }
-  try {
-    new URL(url);
-  } catch {
-    return "Invalid URL format";
+  const scheme = linkScheme(url);
+  if (scheme == null) {
+    return "Invalid URL format (include the scheme, e.g. https://)";
+  }
+  if (!ALLOWED_LINK_SCHEMES.includes(scheme)) {
+    return `URL must start with one of: ${ALLOWED_LINK_SCHEMES.join(" ")}`;
   }
   return null;
 }
@@ -363,9 +390,20 @@ function renderLink(td: HTMLTableCellElement, data: LinkCellData) {
     td.appendChild(s);
     return;
   }
+  if (!isAllowedLinkUrl(data.url)) {
+    // saved before schemes were checked: show it, but not as a link
+    const s = document.createElement("span");
+    s.textContent = data.text ?? data.url;
+    s.title = `Not a clickable link: ${data.url}`;
+    td.appendChild(s);
+    return;
+  }
   const a = document.createElement("a");
   a.href = data.url;
   a.innerText = data.text ?? data.url;
+  // the opened page gets no handle on this tab and no Referer
+  a.rel = "noopener noreferrer";
+  if (a.protocol === "http:" || a.protocol === "https:") a.target = "_blank";
   td.appendChild(a);
 }
 
@@ -463,6 +501,15 @@ function makeCellEditable(
       // refocusTd=false: focusout committed — focus moved elsewhere, clean up class.
       function commit(refocusTd = false) {
         if (!editingActive) return;
+        // An invalid link stays in edit mode (with its error shown) rather
+        // than being saved.
+        if (col.type === "link") {
+          const urlInput = td.getElementsByTagName("input")[0];
+          if (validateUrl(urlInput.value) != null) {
+            if (refocusTd) urlInput.focus();
+            return;
+          }
+        }
         editingActive = false;
         td.removeEventListener("focusout", onFocusOut);
 
