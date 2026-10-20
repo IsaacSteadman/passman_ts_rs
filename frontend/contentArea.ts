@@ -1,9 +1,17 @@
-import type { LoginResult } from "./loginArea";
+import {
+  accountId,
+  forgetAccount,
+  putAccount,
+  putVault,
+  requestPersistentStorage,
+} from "./deviceStore";
+import type { LoginResult, SyncedVault } from "./loginArea";
 import {
   credentialHeaders,
   decodeVault,
   deriveUserKeys,
-  readServerAccessParams,
+  describeError,
+  downloadVault,
 } from "./loginArea";
 import { mergeVaults, vaultsEqual } from "./merge";
 import {
@@ -61,9 +69,20 @@ export function initContentArea(
   // base for merging when another session saved first).
   let currentEtag: string | null = null;
   let baseData: VaultRoot | null = null;
+  // `baseData` encrypted, exactly as the server holds it
+  let baseBlob: Uint8Array | null = null;
   // Set when a merge found changes made in both sessions; saving is paused
   // until the user loads the latest version.
-  let conflict: FetchedVault | null = null;
+  let conflict: SyncedVault | null = null;
+  // Set when the server rejected the auth key because the password was changed
+  // in another session; saving is paused until the new one is entered.
+  let passwordChanged = false;
+  // Whether the account is remembered on this device: its last server version
+  // and unsaved changes are then kept in IndexedDB (encrypted), so it can be
+  // unlocked and edited offline.
+  let remembered = false;
+  // Whether this session has reached the server since it was unlocked.
+  let reachedServer = false;
   // Throttle: only fetch from server if this many ms have elapsed since last fetch.
   const FETCH_THROTTLE_MS = 60 * 60 * 1000; // 1 hour
   let lastFetchTime = 0;
@@ -75,6 +94,13 @@ export function initContentArea(
   conflictDiv.style.display = "none";
   dataDiv.before(conflictDiv);
 
+  // Shown above the vault while `passwordChanged` is set.
+  const passwordChangedDiv = document.createElement("div");
+  passwordChangedDiv.className = "pm-password-changed";
+  passwordChangedDiv.setAttribute("role", "alert");
+  passwordChangedDiv.style.display = "none";
+  dataDiv.before(passwordChangedDiv);
+
   // ── Serial save queue ────────────────────────────────────────────────────
   // Prevents concurrent PUTs from racing; each save chains onto the previous.
   let pendingSave: Promise<void> = Promise.resolve();
@@ -84,25 +110,52 @@ export function initContentArea(
     return pendingSave;
   }
 
-  async function describeError(response: Response): Promise<string> {
-    let body: unknown;
-    try {
-      body = await response.json();
-    } catch {
-      body = await response.text();
-    }
-    return `(${response.status}): ${JSON.stringify(body)}`;
+  function offlineMessage(): string {
+    return remembered
+      ? "Offline — changes are kept on this device and saved when you're back online"
+      : "Offline — changes aren't saved yet; keep this page open until you're back online";
   }
 
-  interface FetchedVault {
-    data: VaultRoot;
-    etag: string | null;
-    lastModified: string | null;
+  function hasUnsavedChanges(): boolean {
+    return (
+      currentData != null &&
+      baseData != null &&
+      !vaultsEqual(currentData, baseData)
+    );
   }
 
-  /** Downloads and decrypts the current server version, or returns an error
-   *  message. */
-  async function fetchVault(): Promise<FetchedVault | string> {
+  /** Stores this session's state on the device if the account is remembered:
+   *  the last server version, and the changes not saved to it yet. Writes are
+   *  applied in the order they're started. */
+  function persistState(): Promise<void> {
+    if (
+      !remembered ||
+      currentEncryptionKey == null ||
+      currentUsername == null ||
+      currentData == null ||
+      baseBlob == null
+    )
+      return Promise.resolve();
+    const pendingBlob = hasUnsavedChanges()
+      ? encryptBlob(
+          currentEncryptionKey,
+          new TextEncoder().encode(JSON.stringify(currentData)),
+        )
+      : null;
+    return putVault({
+      id: accountId(currentUsername, currentServerNs),
+      syncedBlob: baseBlob,
+      syncedEtag: currentEtag,
+      syncedLastModified: currentLastModified,
+      pendingBlob,
+    }).catch((e) => {
+      statSpan.textContent = `⚠ Couldn't store changes on this device: ${e}`;
+    });
+  }
+
+  /** Downloads and decrypts the current server version, or returns why it
+   *  couldn't. */
+  async function fetchVault(): Promise<SyncedVault | string> {
     if (
       currentEncryptionKey == null ||
       currentUsername == null ||
@@ -110,21 +163,27 @@ export function initContentArea(
       currentServerPass == null
     )
       return "Not logged in";
+    const download = await downloadVault(
+      currentUsername,
+      currentServerNs,
+      currentServerPass,
+      currentAuthKeyB64,
+    );
+    if (!download.ok) {
+      if (download.reason === "offline") return offlineMessage();
+      if (download.reason === "credentials") {
+        showPasswordChanged();
+        return "Saving paused: the password was changed";
+      }
+      return `Refresh failed ${download.message}`;
+    }
+    reachedServer = true;
     try {
-      const url = new URL("/pass-table", window.location.origin);
-      url.searchParams.set("username", currentUsername);
-      if (currentServerNs != null)
-        url.searchParams.set("server_ns", currentServerNs);
-      const response = await fetch(url.toString(), {
-        headers: credentialHeaders(currentAuthKeyB64, currentServerPass),
-      });
-      if (!response.ok)
-        return `Refresh failed ${await describeError(response)}`;
-      const blob = new Uint8Array(await response.arrayBuffer());
       return {
-        data: decodeVault(currentEncryptionKey, blob),
-        etag: response.headers.get("ETag"),
-        lastModified: response.headers.get("Last-Modified"),
+        data: decodeVault(currentEncryptionKey, download.blob),
+        blob: download.blob,
+        etag: download.etag,
+        lastModified: download.lastModified,
       };
     } catch (e) {
       return `Refresh error: ${e}`;
@@ -132,12 +191,14 @@ export function initContentArea(
   }
 
   /** Makes `latest` the new base, with `merged` as this session's data. */
-  function adoptServerVersion(merged: VaultRoot, latest: FetchedVault): void {
+  function adoptServerVersion(merged: VaultRoot, latest: SyncedVault): void {
     currentData = merged;
     baseData = latest.data;
+    baseBlob = latest.blob;
     currentEtag = latest.etag;
     currentLastModified = latest.lastModified;
     render();
+    void persistState();
   }
 
   /** After a save was refused because another session saved first: merges
@@ -150,6 +211,12 @@ export function initContentArea(
       statSpan.textContent = `⚠ ${latest}`;
       return false;
     }
+    return mergeWith(latest);
+  }
+
+  /** Merges `latest` into this session's data; false (with saving paused) if
+   *  the merge found conflicts. */
+  function mergeWith(latest: SyncedVault): boolean {
     if (currentData == null || baseData == null) return false;
     const { merged, conflicts } = mergeVaults(
       baseData,
@@ -212,6 +279,9 @@ export function initContentArea(
   }
 
   async function saveVault(): Promise<void> {
+    // stored on the device first, so the change survives the app being closed
+    // or the save failing
+    void persistState();
     return enqueue(async () => {
       // a save refused because another session saved first is retried after
       // merging; a few attempts cover sessions that keep saving meanwhile
@@ -227,6 +297,11 @@ export function initContentArea(
         if (conflict != null) {
           statSpan.textContent =
             "⚠ Saving paused: load the latest version first";
+          return;
+        }
+        if (passwordChanged) {
+          statSpan.textContent =
+            "⚠ Saving paused: enter the new password first";
           return;
         }
 
@@ -250,24 +325,39 @@ export function initContentArea(
           };
           if (currentEtag != null) headers["If-Match"] = currentEtag;
 
-          const response = await fetch(url.toString(), {
-            method: "PUT",
-            headers,
-            body: blob,
-          });
+          let response: Response;
+          try {
+            response = await fetch(url.toString(), {
+              method: "PUT",
+              headers,
+              body: blob,
+            });
+          } catch {
+            // no response: the change stays pending until the next save
+            statSpan.textContent = offlineMessage();
+            return;
+          }
+          reachedServer = true;
 
           if (response.status === 412) {
             if (!(await mergeLatest())) return;
             continue;
           }
           if (!response.ok) {
-            statSpan.textContent = `Save failed ${await describeError(response)}`;
+            const error = await describeError(response);
+            if (error.type === "E_AUTH") {
+              showPasswordChanged();
+              return;
+            }
+            statSpan.textContent = `Save failed ${error.message}`;
             return;
           }
 
           currentEtag = response.headers.get("ETag");
           currentLastModified = response.headers.get("Last-Modified");
           baseData = JSON.parse(json) as VaultRoot;
+          baseBlob = blob;
+          void persistState();
           statSpan.textContent = currentLastModified
             ? `Last saved: ${currentLastModified}`
             : "Saved";
@@ -280,6 +370,125 @@ export function initContentArea(
       statSpan.textContent =
         "⚠ Save failed: the vault keeps changing in another session";
     });
+  }
+
+  /** Brings this session up to date with the server: merges in the latest
+   *  version, then saves this session's changes, if any. */
+  async function syncWithServer(): Promise<void> {
+    await enqueue(async () => {
+      if (conflict != null || passwordChanged) return;
+      statSpan.textContent = "Checking for changes…";
+      const latest = await fetchVault();
+      if (typeof latest === "string") {
+        statSpan.textContent = `⚠ ${latest}`;
+        return;
+      }
+      if (latest.etag !== currentEtag) mergeWith(latest);
+      else showSavedStatus();
+    });
+    if (hasUnsavedChanges()) await saveVault();
+  }
+
+  // Back online: save what was changed offline. If the server wasn't reached
+  // since unlocking (so the vault may be out of date), merge its version too.
+  window.addEventListener("online", () => {
+    if (currentData == null) return;
+    if (!reachedServer) void syncWithServer();
+    else if (hasUnsavedChanges()) void saveVault();
+  });
+
+  function showPasswordChanged(): void {
+    if (passwordChanged) return;
+    passwordChanged = true;
+    statSpan.textContent = "⚠ Saving paused: the password was changed";
+    passwordChangedDiv.innerHTML = "";
+    const intro = document.createElement("p");
+    intro.textContent =
+      "The password for this account was changed in another session. Enter the new password to continue saving; the changes made here will be merged with the other session's.";
+    const form = document.createElement("form");
+    form.method = "dialog";
+    form.className = "pm-inline-form";
+    const input = document.createElement("input");
+    input.type = "password";
+    input.name = "new-password";
+    input.autocomplete = "current-password";
+    input.setAttribute("aria-label", "New password");
+    const submit = document.createElement("button");
+    submit.type = "submit";
+    submit.className = "pm-btn pm-btn-primary";
+    submit.textContent = "Continue";
+    const status = document.createElement("span");
+    form.append(input, submit, status);
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      submit.disabled = true;
+      try {
+        status.textContent = "Checking…";
+        status.textContent = await adoptNewPassword(input.value);
+      } finally {
+        submit.disabled = false;
+      }
+    });
+    passwordChangedDiv.append(intro, form);
+    passwordChangedDiv.style.display = "";
+  }
+
+  function hidePasswordChanged(): void {
+    passwordChanged = false;
+    passwordChangedDiv.innerHTML = "";
+    passwordChangedDiv.style.display = "none";
+  }
+
+  /** Switches to the password set in another session and merges that
+   *  session's version. Returns an error message, or "" on success. */
+  async function adoptNewPassword(password: string): Promise<string> {
+    if (currentUsername == null || currentServerPass == null) return "";
+    let keys: { authKeyB64: string; encryptionKey: Uint8Array };
+    try {
+      keys = await deriveUserKeys(currentUsername, password);
+    } catch (e) {
+      return `Key derivation failed: ${e}`;
+    }
+    const download = await downloadVault(
+      currentUsername,
+      currentServerNs,
+      currentServerPass,
+      keys.authKeyB64,
+    );
+    if (!download.ok) {
+      if (download.reason === "credentials") return "Wrong password.";
+      if (download.reason === "offline") return "Can't reach the server.";
+      return `Failed ${download.message}`;
+    }
+    let data: VaultRoot;
+    try {
+      data = decodeVault(keys.encryptionKey, download.blob);
+    } catch (e) {
+      return `Decryption failed: ${e}`;
+    }
+    await enqueue(async () => {
+      currentAuthKeyB64 = keys.authKeyB64;
+      currentEncryptionKey = keys.encryptionKey;
+      // this device's copy of the base version is re-encrypted with the new
+      // key too, so it stays readable even if the merge below pauses saving
+      if (baseData != null)
+        baseBlob = encryptBlob(
+          keys.encryptionKey,
+          new TextEncoder().encode(JSON.stringify(baseData)),
+        );
+      hidePasswordChanged();
+      mergeWith({
+        data,
+        blob: download.blob,
+        etag: download.etag,
+        lastModified: download.lastModified,
+      });
+      // a merge paused by conflicts doesn't store anything, so store the
+      // re-encrypted copy here
+      void persistState();
+    });
+    if (hasUnsavedChanges()) await saveVault();
+    return "";
   }
 
   // ── Background check for a newer version (when an edit starts) ──────────
@@ -296,25 +505,24 @@ export function initContentArea(
     // Throttle: skip if we fetched recently.
     if (Date.now() - lastFetchTime < FETCH_THROTTLE_MS) return null;
 
-    try {
-      const url = new URL("/pass-table", window.location.origin);
-      url.searchParams.set("username", currentUsername);
-      if (currentServerNs != null)
-        url.searchParams.set("server_ns", currentServerNs);
-
-      const response = await fetch(url.toString(), {
-        headers: credentialHeaders(currentAuthKeyB64, currentServerPass),
-      });
-      if (!response.ok) return `Refresh failed (${response.status})`;
-
-      lastFetchTime = Date.now();
-      const etag = response.headers.get("ETag");
-      if (etag != null && etag !== currentEtag)
-        return "Vault updated in another session — those changes will be merged when you save";
-      return null;
-    } catch (e) {
-      return `Refresh error: ${e}`;
+    const download = await downloadVault(
+      currentUsername,
+      currentServerNs,
+      currentServerPass,
+      currentAuthKeyB64,
+    );
+    if (!download.ok) {
+      if (download.reason === "offline") return null;
+      if (download.reason === "credentials") {
+        showPasswordChanged();
+        return null;
+      }
+      return `Refresh failed ${download.message}`;
     }
+    lastFetchTime = Date.now();
+    if (download.etag != null && download.etag !== currentEtag)
+      return "Vault updated in another session — those changes will be merged when you save";
+    return null;
   }
 
   // ── History UI ────────────────────────────────────────────────────────────
@@ -651,12 +859,16 @@ export function initContentArea(
   };
 
   // ── Render ────────────────────────────────────────────────────────────────
-  function render(): void {
-    if (currentData == null) return;
-    dataDiv.innerHTML = "";
+  function showSavedStatus(): void {
     statSpan.textContent = currentLastModified
       ? `Last saved: ${currentLastModified}`
       : "Unsaved";
+  }
+
+  function render(): void {
+    if (currentData == null) return;
+    dataDiv.innerHTML = "";
+    showSavedStatus();
 
     currentData.tables.forEach((table) => {
       const tableDiv = document.createElement("div");
@@ -779,6 +991,7 @@ export function initContentArea(
       currentUsername == null ||
       currentEncryptionKey == null ||
       currentAuthKeyB64 == null ||
+      currentServerPass == null ||
       currentData == null ||
       currentEtag == null
     ) {
@@ -819,10 +1032,11 @@ export function initContentArea(
       return;
     }
 
-    const { serverPass, serverNs } = readServerAccessParams();
+    const serverPass = currentServerPass;
     const url = new URL("/pass-table-new-pass", window.location.origin);
     url.searchParams.set("username", currentUsername);
-    if (serverNs != null) url.searchParams.set("server_ns", serverNs);
+    if (currentServerNs != null)
+      url.searchParams.set("server_ns", currentServerNs);
 
     // queued with saves, so a save still using the old key can't run after it
     await enqueue(async () => {
@@ -870,7 +1084,7 @@ export function initContentArea(
           continue;
         }
         if (!response.ok) {
-          chgPassStatus.textContent = `Change password failed ${await describeError(response)}`;
+          chgPassStatus.textContent = `Change password failed ${(await describeError(response)).message}`;
           return;
         }
 
@@ -879,6 +1093,9 @@ export function initContentArea(
         currentEtag = response.headers.get("ETag");
         currentLastModified = response.headers.get("Last-Modified");
         baseData = JSON.parse(json) as VaultRoot;
+        baseBlob = blob;
+        // re-encrypts this device's copy with the new key
+        void persistState();
         statSpan.textContent = currentLastModified
           ? `Last saved: ${currentLastModified}`
           : "Saved";
@@ -895,6 +1112,70 @@ export function initContentArea(
     });
   });
 
+  // ── This Device ───────────────────────────────────────────────────────────
+  const deviceDetails = contentDiv.querySelector(
+    "details[name='this-device']",
+  ) as HTMLDetailsElement;
+  const deviceStatus = deviceDetails.querySelector(
+    "[name='device-status']",
+  ) as HTMLElement;
+  const rememberButton = deviceDetails.querySelector(
+    "button[name='remember-device']",
+  ) as HTMLButtonElement;
+  const forgetButton = deviceDetails.querySelector(
+    "button[name='forget-device']",
+  ) as HTMLButtonElement;
+
+  function renderDeviceSection(): void {
+    deviceStatus.textContent = remembered
+      ? "This account is remembered on this device: it can be unlocked offline, and changes made offline are saved when you're back online."
+      : "This account isn't stored on this device: it needs a connection to unlock, and nothing is kept after you log out.";
+    rememberButton.style.display = remembered ? "none" : "";
+    forgetButton.style.display = remembered ? "" : "none";
+  }
+
+  /** Records the account in the device's list (or updates its server password
+   *  and last use) and stores the current state. */
+  async function rememberAccount(): Promise<void> {
+    if (currentUsername == null || currentServerPass == null) return;
+    remembered = true;
+    renderDeviceSection();
+    try {
+      await putAccount({
+        id: accountId(currentUsername, currentServerNs),
+        username: currentUsername,
+        serverNs: currentServerNs,
+        serverPass: currentServerPass,
+        lastUsed: Date.now(),
+      });
+    } catch (e) {
+      statSpan.textContent = `⚠ Couldn't remember this account on this device: ${e}`;
+      return;
+    }
+    await persistState();
+    void requestPersistentStorage();
+  }
+
+  rememberButton.addEventListener("click", () => rememberAccount());
+
+  forgetButton.addEventListener("click", async () => {
+    if (currentUsername == null) return;
+    if (
+      hasUnsavedChanges() &&
+      !window.confirm(
+        "Some changes haven't been saved to the server yet. They'll be lost if you log out after forgetting this account on this device. Forget it anyway?",
+      )
+    )
+      return;
+    remembered = false;
+    renderDeviceSection();
+    try {
+      await forgetAccount(accountId(currentUsername, currentServerNs));
+    } catch (e) {
+      statSpan.textContent = `⚠ Couldn't remove this account from this device: ${e}`;
+    }
+  });
+
   logoutButton.addEventListener("click", () => {
     currentEncryptionKey = null;
     currentUsername = null;
@@ -905,7 +1186,11 @@ export function initContentArea(
     currentData = null;
     currentEtag = null;
     baseData = null;
+    baseBlob = null;
+    remembered = false;
+    reachedServer = false;
     hideConflict();
+    hidePasswordChanged();
     historyDetails = null;
     lastFetchTime = 0;
     // hiding is not enough: the decrypted vault would stay in the DOM
@@ -919,6 +1204,7 @@ export function initContentArea(
     confirmNewPassChgInput.value = "";
     chgPassStatus.textContent = "";
     changePassDetails.open = false;
+    deviceDetails.open = false;
     contentDiv.style.display = "none";
     onLogout();
   });
@@ -938,26 +1224,34 @@ export function initContentArea(
     },
 
     show({
-      data,
-      lastModified,
-      encryptionKey,
       username,
-      authKeyB64,
       serverPass,
       serverNs,
-      etag,
+      authKeyB64,
+      encryptionKey,
+      synced,
+      pending,
+      remember,
+      fromCache,
     }: LoginResult): void {
       currentEncryptionKey = encryptionKey;
       currentUsername = username;
       currentAuthKeyB64 = authKeyB64;
       currentServerPass = serverPass;
       currentServerNs = serverNs;
-      currentLastModified = lastModified;
-      currentData = data;
-      currentEtag = etag;
-      baseData = structuredClone(data);
+      currentLastModified = synced.lastModified;
+      currentData = pending ?? structuredClone(synced.data);
+      currentEtag = synced.etag;
+      baseData = synced.data;
+      baseBlob = synced.blob;
+      reachedServer = !fromCache;
       contentDiv.style.display = "";
       render();
+      remembered = remember;
+      renderDeviceSection();
+      if (remember) void rememberAccount();
+      // the copy on this device may be out of date
+      if (fromCache) void syncWithServer();
     },
   };
 }

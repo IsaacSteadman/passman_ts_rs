@@ -64,7 +64,7 @@ async fn dev_proxy(req: &HttpRequest, body: web::Bytes, base_url: &str) -> HttpR
 /// check these with the server on every load, or they could keep using an old
 /// index.html (and so the old app) after a deploy. Parcel puts a content hash
 /// in every other file name.
-const UNHASHED_FILES: &[&str] = &["index.html", "manifest.webmanifest"];
+const UNHASHED_FILES: &[&str] = &["index.html", "manifest.webmanifest", "sw.js"];
 
 fn serve_static(req: &HttpRequest, dir: &PathBuf) -> HttpResponse {
     let rel = req.path().trim_start_matches('/');
@@ -108,7 +108,12 @@ mod tests {
     #[actix_web::test]
     async fn unhashed_files_must_be_revalidated() {
         let dist = tempfile::tempdir().unwrap();
-        for name in ["index.html", "manifest.webmanifest", "main.1a2b3c4d.js"] {
+        for name in [
+            "index.html",
+            "manifest.webmanifest",
+            "sw.js",
+            "main.1a2b3c4d.js",
+        ] {
             std::fs::write(dist.path().join(name), "x").unwrap();
         }
         let app = test::init_service(
@@ -125,7 +130,7 @@ mod tests {
                 .map(|v| v.to_str().unwrap().to_owned())
         };
 
-        for path in ["/", "/index.html", "/some/app/route"] {
+        for path in ["/", "/index.html", "/some/app/route", "/sw.js"] {
             let resp =
                 test::call_service(&app, test::TestRequest::get().uri(path).to_request()).await;
             assert_eq!(cache_control(&resp).as_deref(), Some("no-cache"), "{path}");

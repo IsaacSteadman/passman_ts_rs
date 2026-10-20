@@ -7,7 +7,15 @@ import {
   type LoginResult,
 } from "./loginArea";
 import { initContentArea } from "./contentArea";
+import { initLockScreen } from "./lockScreen";
 import { initPassgenPanel } from "./passgenPanel";
+
+if ("serviceWorker" in navigator) {
+  // keeps a copy of the app so it starts offline (see sw.ts)
+  navigator.serviceWorker
+    .register(new URL("sw.ts", import.meta.url), { type: "module" })
+    .catch((e) => console.warn("Service worker registration failed", e));
+}
 
 document.addEventListener("DOMContentLoaded", async () => {
   // Prefill server access params from URL query params if present
@@ -50,6 +58,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     contentDiv.style.display = "none";
     loginDiv.style.display = "";
     if (authWrap) authWrap.style.display = "";
+    void lockScreen.refresh();
   });
 
   const passgenHandle = initPassgenPanel(
@@ -57,10 +66,13 @@ document.addEventListener("DOMContentLoaded", async () => {
     (entries) => contentHandle.recordChanges(entries),
   );
 
-  initLoginArea(errorPanel, (result: LoginResult) => {
+  const onLogin = (result: LoginResult) => {
+    errorPanel.textContent = "";
     if (authWrap) authWrap.style.display = "none";
     contentHandle.show(result);
-  });
+  };
+  initLoginArea(errorPanel, onLogin);
+  const lockScreen = initLockScreen(errorPanel, onLogin);
 
   // --- Register form ---
   const registerForm = registerDiv.querySelector("form")!;

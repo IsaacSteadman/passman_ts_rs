@@ -652,8 +652,10 @@ body {
   padding: 0;
 }
 
-// Shown when another session changed the same vault items (saving paused)
-.pm-conflict {
+// Shown when another session changed the same vault items, or changed the
+// password (saving paused)
+.pm-conflict,
+.pm-password-changed {
   color: #991b1b;
   background: #fef2f2;
   border: 1px solid #fca5a5;
@@ -1044,4 +1046,122 @@ body {
   .pm-auth-submit {
     min-height: 44px;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Accounts remembered on this device (login card)
+// ---------------------------------------------------------------------------
+.pm-remembered-label {
+  margin: 0 0 0.6rem;
+  font-size: 0.75em;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #6b7280;
+}
+.pm-account-list {
+  list-style: none;
+  margin: 0 0 1.25rem;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+.pm-account {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  width: 100%;
+  padding: 0.7em 0.9em;
+  border: 1px solid #d1d5db;
+  border-radius: 7px;
+  background: #ffffff;
+  font-family: inherit;
+  font-size: 0.95em;
+  text-align: left;
+  cursor: pointer;
+  &:hover {
+    border-color: #3b82f6;
+    background: #eff6ff;
+  }
+}
+.pm-account-name {
+  font-weight: 600;
+  color: #111827;
+}
+.pm-account-ns {
+  font-size: 0.85em;
+  color: #6b7280;
+}
+.pm-unlock {
+  display: none;
+}
+.pm-unlock-account {
+  margin: 0 0 1rem;
+  font-weight: 600;
+}
+.pm-unlock-actions {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-top: 1rem;
+}
+// While unlocking a remembered account, only its form is shown
+.pm-auth-card.pm-unlocking {
+  .pm-unlock {
+    display: block;
+  }
+  .pm-remembered-list,
+  #login,
+  #register,
+  .pm-server-settings {
+    display: none !important;
+  }
+}
+
+.pm-check-field {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  margin: -0.25rem 0 1rem;
+  font-size: 0.875em;
+  color: #374151;
+  cursor: pointer;
+}
+
+.pm-visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+// Inline input + button (e.g. new password prompt)
+.pm-inline-form {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  input {
+    flex: 1;
+    min-width: 12em;
+    padding: 0.4em 0.6em;
+    border: 1px solid #d1d5db;
+    border-radius: 5px;
+    font-family: inherit;
+  }
+}
+
+// This Device section
+.pm-device-status {
+  margin: 0 0 1rem;
+  font-size: 0.9em;
+  color: #374151;
+}
+.pm-device-actions {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
 }
