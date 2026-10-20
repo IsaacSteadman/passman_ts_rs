@@ -1,6 +1,6 @@
 use actix_web::{
     HttpRequest, HttpResponse, Responder as _,
-    http::header::{CONNECTION, HOST, TRANSFER_ENCODING},
+    http::header::{CACHE_CONTROL, CONNECTION, HOST, HeaderValue, TRANSFER_ENCODING},
     web,
 };
 use std::path::PathBuf;
@@ -60,6 +60,12 @@ async fn dev_proxy(req: &HttpRequest, body: web::Bytes, base_url: &str) -> HttpR
     }
 }
 
+/// Files whose names stay the same from one build to the next. Browsers must
+/// check these with the server on every load, or they could keep using an old
+/// index.html (and so the old app) after a deploy. Parcel puts a content hash
+/// in every other file name.
+const UNHASHED_FILES: &[&str] = &["index.html", "manifest.webmanifest"];
+
 fn serve_static(req: &HttpRequest, dir: &PathBuf) -> HttpResponse {
     let rel = req.path().trim_start_matches('/');
     let candidate = if rel.is_empty() {
@@ -81,7 +87,64 @@ fn serve_static(req: &HttpRequest, dir: &PathBuf) -> HttpResponse {
     };
 
     match actix_files::NamedFile::open(&path) {
-        Ok(f) => f.respond_to(req),
+        Ok(f) => {
+            let mut resp = f.respond_to(req);
+            let name = path.file_name().and_then(|name| name.to_str());
+            if name.is_some_and(|name| UNHASHED_FILES.contains(&name)) {
+                resp.headers_mut()
+                    .insert(CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+            }
+            resp
+        }
         Err(e) => HttpResponse::InternalServerError().body(format!("{e}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use actix_web::{App, test};
+
+    #[actix_web::test]
+    async fn unhashed_files_must_be_revalidated() {
+        let dist = tempfile::tempdir().unwrap();
+        for name in ["index.html", "manifest.webmanifest", "main.1a2b3c4d.js"] {
+            std::fs::write(dist.path().join(name), "x").unwrap();
+        }
+        let app = test::init_service(
+            App::new()
+                .app_data(web::Data::new(FrontendMode::StaticFiles(
+                    dist.path().to_path_buf(),
+                )))
+                .default_service(web::to(frontend_handler)),
+        )
+        .await;
+        let cache_control = |resp: &actix_web::dev::ServiceResponse| {
+            resp.headers()
+                .get(CACHE_CONTROL)
+                .map(|v| v.to_str().unwrap().to_owned())
+        };
+
+        for path in ["/", "/index.html", "/some/app/route"] {
+            let resp =
+                test::call_service(&app, test::TestRequest::get().uri(path).to_request()).await;
+            assert_eq!(cache_control(&resp).as_deref(), Some("no-cache"), "{path}");
+        }
+
+        let req = test::TestRequest::get()
+            .uri("/manifest.webmanifest")
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(cache_control(&resp).as_deref(), Some("no-cache"));
+        assert_eq!(
+            resp.headers().get("content-type").unwrap(),
+            "application/manifest+json"
+        );
+
+        let req = test::TestRequest::get()
+            .uri("/main.1a2b3c4d.js")
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        assert_eq!(cache_control(&resp), None);
     }
 }
