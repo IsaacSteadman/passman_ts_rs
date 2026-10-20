@@ -5,6 +5,7 @@ import {
   putVault,
   requestPersistentStorage,
 } from "./deviceStore";
+import { keyProtector, unlockErrorMessage } from "./keyProtector";
 import type { LoginResult, SyncedVault } from "./loginArea";
 import {
   credentialHeaders,
@@ -487,6 +488,7 @@ export function initContentArea(
       // re-encrypted copy here
       void persistState();
     });
+    void keysChanged();
     if (hasUnsavedChanges()) await saveVault();
     return "";
   }
@@ -1096,6 +1098,7 @@ export function initContentArea(
         baseBlob = blob;
         // re-encrypts this device's copy with the new key
         void persistState();
+        void keysChanged();
         statSpan.textContent = currentLastModified
           ? `Last saved: ${currentLastModified}`
           : "Saved";
@@ -1126,13 +1129,129 @@ export function initContentArea(
     "button[name='forget-device']",
   ) as HTMLButtonElement;
 
+  const biometricDiv = deviceDetails.querySelector(
+    "[name='biometric']",
+  ) as HTMLElement;
+  const biometricStatus = biometricDiv.querySelector(
+    "[name='biometric-status']",
+  ) as HTMLElement;
+  const biometricMessage = biometricDiv.querySelector(
+    "[name='biometric-message']",
+  ) as HTMLElement;
+  const enableBiometricButton = biometricDiv.querySelector(
+    "button[name='enable-biometric']",
+  ) as HTMLButtonElement;
+  const updateBiometricButton = biometricDiv.querySelector(
+    "button[name='update-biometric']",
+  ) as HTMLButtonElement;
+  const disableBiometricButton = biometricDiv.querySelector(
+    "button[name='disable-biometric']",
+  ) as HTMLButtonElement;
+
   function renderDeviceSection(): void {
     deviceStatus.textContent = remembered
       ? "This account is remembered on this device: it can be unlocked offline, and changes made offline are saved when you're back online."
       : "This account isn't stored on this device: it needs a connection to unlock, and nothing is kept after you log out.";
     rememberButton.style.display = remembered ? "none" : "";
     forgetButton.style.display = remembered ? "" : "none";
+    void renderBiometricSection();
   }
+
+  /** Biometric unlock needs the account to be remembered: it unlocks the copy
+   *  on this device. */
+  async function renderBiometricSection(): Promise<void> {
+    const shown = (button: HTMLElement, show: boolean) =>
+      (button.style.display = show ? "" : "none");
+    if (!remembered || currentUsername == null) {
+      biometricDiv.style.display = "none";
+      return;
+    }
+    const id = accountId(currentUsername, currentServerNs);
+    const [supported, status] = await Promise.all([
+      keyProtector.isSupported(),
+      keyProtector.status(id).catch(() => null),
+    ]);
+    // the session may have ended (or switched) meanwhile
+    if (
+      currentUsername == null ||
+      accountId(currentUsername, currentServerNs) !== id
+    )
+      return;
+    biometricDiv.style.display = "";
+    if (status == null) {
+      biometricStatus.textContent = supported
+        ? "Unlock this account with Face ID, Touch ID or a fingerprint instead of the password. The device's passcode also works if biometrics fail."
+        : "Biometric unlock isn't available in this browser.";
+    } else if (status.current) {
+      biometricStatus.textContent =
+        "Biometric unlock is on." +
+        (status.synced === true
+          ? " Its passkey syncs with your Apple or Google account, but it only works together with a key kept on this device."
+          : status.synced === false
+            ? " Its passkey is stored only on this device."
+            : "");
+    } else {
+      biometricStatus.textContent =
+        "Biometric unlock needs to be confirmed again (the password was changed, or setting it up wasn't finished).";
+    }
+    shown(enableBiometricButton, status == null && supported);
+    shown(updateBiometricButton, status != null && !status.current);
+    shown(disableBiometricButton, status != null);
+  }
+
+  /** Called when this session's keys changed (the password was changed):
+   *  biometric unlock still holds the old ones until it is confirmed again. */
+  async function keysChanged(): Promise<void> {
+    if (currentUsername == null) return;
+    try {
+      await keyProtector.invalidate(
+        accountId(currentUsername, currentServerNs),
+      );
+    } catch (e) {
+      biometricMessage.textContent = `⚠ ${e}`;
+    }
+    void renderBiometricSection();
+  }
+
+  async function protectKeys(): Promise<void> {
+    if (
+      currentUsername == null ||
+      currentAuthKeyB64 == null ||
+      currentEncryptionKey == null
+    )
+      return;
+    const label = currentServerNs
+      ? `${currentUsername} (${currentServerNs})`
+      : currentUsername;
+    biometricMessage.textContent = "Waiting for biometrics…";
+    try {
+      await keyProtector.protect(
+        accountId(currentUsername, currentServerNs),
+        label,
+        {
+          authKeyB64: currentAuthKeyB64,
+          encryptionKey: currentEncryptionKey,
+        },
+      );
+      biometricMessage.textContent = "";
+    } catch (e) {
+      biometricMessage.textContent = unlockErrorMessage(e);
+    }
+    await renderBiometricSection();
+  }
+
+  enableBiometricButton.addEventListener("click", () => protectKeys());
+  updateBiometricButton.addEventListener("click", () => protectKeys());
+  disableBiometricButton.addEventListener("click", async () => {
+    if (currentUsername == null) return;
+    try {
+      await keyProtector.remove(accountId(currentUsername, currentServerNs));
+      biometricMessage.textContent = "";
+    } catch (e) {
+      biometricMessage.textContent = `⚠ ${e}`;
+    }
+    await renderBiometricSection();
+  });
 
   /** Records the account in the device's list (or updates its server password
    *  and last use) and stores the current state. */
@@ -1170,7 +1289,9 @@ export function initContentArea(
     remembered = false;
     renderDeviceSection();
     try {
-      await forgetAccount(accountId(currentUsername, currentServerNs));
+      const id = accountId(currentUsername, currentServerNs);
+      await keyProtector.remove(id);
+      await forgetAccount(id);
     } catch (e) {
       statSpan.textContent = `⚠ Couldn't remove this account from this device: ${e}`;
     }
@@ -1205,6 +1326,7 @@ export function initContentArea(
     chgPassStatus.textContent = "";
     changePassDetails.open = false;
     deviceDetails.open = false;
+    biometricMessage.textContent = "";
     contentDiv.style.display = "none";
     onLogout();
   });
@@ -1233,6 +1355,7 @@ export function initContentArea(
       pending,
       remember,
       fromCache,
+      keysChanged: changed,
     }: LoginResult): void {
       currentEncryptionKey = encryptionKey;
       currentUsername = username;
@@ -1250,6 +1373,7 @@ export function initContentArea(
       remembered = remember;
       renderDeviceSection();
       if (remember) void rememberAccount();
+      if (changed) void keysChanged();
       // the copy on this device may be out of date
       if (fromCache) void syncWithServer();
     },

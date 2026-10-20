@@ -37,6 +37,9 @@ export interface LoginResult {
   /** Whether `synced` was read from this device's cache rather than
    *  downloaded just now, so a newer version may be on the server. */
   fromCache: boolean;
+  /** Set when the password was changed in another session: this device's
+   *  copy (and biometric unlock) still use the old keys. */
+  keysChanged: boolean;
 }
 
 /** Vaults saved before tables had ids were a bare array of these. */
@@ -217,12 +220,13 @@ function decodeCached(
   };
 }
 
-/**
- * Checks a password and loads the vault. An account remembered on this device
- * is unlocked from its cached copy, which works offline: a wrong password
- * fails to decrypt it. Other accounts are downloaded from the server.
- * Returns an error message on failure.
- */
+export interface UserKeys {
+  authKeyB64: string;
+  encryptionKey: Uint8Array;
+}
+
+/** Checks a password and loads the vault (see `unlockWithKeys`). Returns an
+ *  error message on failure. */
 export async function unlockWithPassword(
   username: string,
   serverNs: string | null,
@@ -230,14 +234,29 @@ export async function unlockWithPassword(
   password: string,
   remember: boolean,
 ): Promise<LoginResult | string> {
-  let authKeyB64: string;
-  let encryptionKey: Uint8Array;
+  let keys: UserKeys;
   try {
-    ({ authKeyB64, encryptionKey } = await deriveUserKeys(username, password));
+    keys = await deriveUserKeys(username, password);
   } catch (e) {
     return `Key derivation failed: ${e}`;
   }
+  return unlockWithKeys(username, serverNs, serverPass, keys, remember);
+}
 
+/**
+ * Loads the vault with keys from the password or from biometric unlock. An
+ * account remembered on this device is unlocked from its cached copy, which
+ * works offline: wrong keys fail to decrypt it. Other accounts are downloaded
+ * from the server. Returns an error message on failure.
+ */
+export async function unlockWithKeys(
+  username: string,
+  serverNs: string | null,
+  serverPass: string,
+  keys: UserKeys,
+  remember: boolean,
+): Promise<LoginResult | string> {
+  const { authKeyB64, encryptionKey } = keys;
   const id = accountId(username, serverNs);
   const account = await getAccount(id);
   const cached = account && (await getVault(id));
@@ -253,6 +272,7 @@ export async function unlockWithPassword(
         ...decodeCached(encryptionKey, cached),
         remember: true,
         fromCache: true,
+        keysChanged: false,
       };
     } catch {
       // a wrong password, or the password was changed in another session:
@@ -294,6 +314,7 @@ export async function unlockWithPassword(
     pending: null,
     remember: remember || account != null,
     fromCache: false,
+    keysChanged: cached != null,
   };
 }
 

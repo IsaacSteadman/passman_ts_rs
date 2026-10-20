@@ -1,12 +1,23 @@
 // Lists the accounts remembered on this device on the login card, and unlocks
-// them. Unlocking reads the vault cached on the device, so it works offline.
+// them with biometrics or the password. Unlocking reads the vault cached on
+// the device, so it works offline.
 
 import {
   forgetAccount,
   listAccounts,
   type RememberedAccount,
 } from "./deviceStore";
-import { unlockWithPassword, type LoginResult } from "./loginArea";
+import {
+  keyProtector,
+  unlockErrorMessage,
+  type ProtectionStatus,
+  type UnlockSecrets,
+} from "./keyProtector";
+import {
+  unlockWithKeys,
+  unlockWithPassword,
+  type LoginResult,
+} from "./loginArea";
 
 export interface LockScreenHandle {
   /** Re-reads the remembered accounts (e.g. after logging out). */
@@ -43,8 +54,21 @@ export function initLockScreen(
   const forgetButton = form.querySelector(
     "button[name='forget']",
   ) as HTMLButtonElement;
+  const biometricDiv = form.querySelector(
+    ".pm-biometric-unlock",
+  ) as HTMLDivElement;
+  const biometricButton = biometricDiv.querySelector(
+    "button[name='biometric']",
+  ) as HTMLButtonElement;
 
   let selected: RememberedAccount | null = null;
+  // biometric unlock's state per account, read when the list is shown so the
+  // prompt can start straight from a tap
+  let protection = new Map<string, ProtectionStatus | null>();
+
+  function canUseBiometrics(account: RememberedAccount): boolean {
+    return protection.get(account.id)?.current === true;
+  }
 
   function describe(account: RememberedAccount): string {
     return account.serverNs
@@ -60,7 +84,38 @@ export function initLockScreen(
     if (account == null) return;
     accountLabel.textContent = `Unlock ${describe(account)}`;
     usernameInput.value = account.username;
-    passwordInput.focus();
+    biometricDiv.style.display = canUseBiometrics(account) ? "" : "none";
+    if (!canUseBiometrics(account)) passwordInput.focus();
+  }
+
+  async function unlockWithBiometrics(account: RememberedAccount) {
+    errorPanel.textContent = "Waiting for biometrics…";
+    biometricButton.disabled = true;
+    try {
+      let keys: UnlockSecrets;
+      try {
+        keys = await keyProtector.unlock(account.id);
+      } catch (e) {
+        errorPanel.textContent = unlockErrorMessage(e);
+        return;
+      }
+      errorPanel.textContent = "Unlocking…";
+      const result = await unlockWithKeys(
+        account.username,
+        account.serverNs,
+        account.serverPass,
+        keys,
+        true,
+      );
+      if (typeof result === "string") {
+        errorPanel.textContent = `${result} Unlock with the password instead.`;
+        return;
+      }
+      select(null);
+      onUnlock(result);
+    } finally {
+      biometricButton.disabled = false;
+    }
   }
 
   async function refresh(): Promise<void> {
@@ -72,6 +127,17 @@ export function initLockScreen(
       console.warn("Couldn't read remembered accounts", e);
       accounts = [];
     }
+    protection = new Map(
+      await Promise.all(
+        accounts.map(
+          async (account) =>
+            [
+              account.id,
+              await keyProtector.status(account.id).catch(() => null),
+            ] as const,
+        ),
+      ),
+    );
     list.innerHTML = "";
     for (const account of accounts) {
       const item = document.createElement("li");
@@ -88,7 +154,10 @@ export function initLockScreen(
         ns.textContent = account.serverNs;
         button.append(ns);
       }
-      button.addEventListener("click", () => select(account));
+      button.addEventListener("click", () => {
+        select(account);
+        if (canUseBiometrics(account)) void unlockWithBiometrics(account);
+      });
       item.append(button);
       list.append(item);
     }
@@ -123,6 +192,10 @@ export function initLockScreen(
 
   backButton.addEventListener("click", () => select(null));
 
+  biometricButton.addEventListener("click", () => {
+    if (selected) void unlockWithBiometrics(selected);
+  });
+
   forgetButton.addEventListener("click", async () => {
     const account = selected;
     if (
@@ -133,6 +206,7 @@ export function initLockScreen(
     )
       return;
     try {
+      await keyProtector.remove(account.id);
       await forgetAccount(account.id);
     } catch (e) {
       errorPanel.textContent = `Couldn't remove the account: ${e}`;

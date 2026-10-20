@@ -52,6 +52,12 @@
           <ul class="pm-account-list pm-remembered-list"></ul>
           <form method="dialog" class="pm-unlock">
             <p class="pm-unlock-account"></p>
+            <div class="pm-biometric-unlock" style="display: none">
+              <button type="button" name="biometric" class="pm-auth-submit">
+                Unlock with biometrics
+              </button>
+              <p class="pm-unlock-or">or enter the password</p>
+            </div>
             <!-- lets password managers match the saved login -->
             <input
               type="text"
@@ -757,6 +763,34 @@
               >
                 Forget on this device
               </button>
+            </div>
+            <!-- Shown only for remembered accounts -->
+            <div name="biometric" class="pm-device-biometric">
+              <p name="biometric-status" class="pm-device-status"></p>
+              <div class="pm-device-actions">
+                <button
+                  type="button"
+                  name="enable-biometric"
+                  class="pm-btn pm-btn-primary"
+                >
+                  Turn on biometric unlock
+                </button>
+                <button
+                  type="button"
+                  name="update-biometric"
+                  class="pm-btn pm-btn-primary"
+                >
+                  Confirm biometric unlock
+                </button>
+                <button
+                  type="button"
+                  name="disable-biometric"
+                  class="pm-btn pm-btn-ghost"
+                >
+                  Turn off biometric unlock
+                </button>
+              </div>
+              <p name="biometric-message" class="pm-chg-pass-status"></p>
             </div>
           </div>
         </details>

@@ -24,14 +24,21 @@ export interface CachedVault {
   pendingBlob: Uint8Array | null;
 }
 
+/** What biometric unlock stores for an account (see keyProtector.ts). The
+ *  shape depends on the protector, so it's opaque here. */
+export interface StoredUnlockKey {
+  id: string;
+}
+
 const DB_NAME = "passman";
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 const ACCOUNTS = "accounts";
 const VAULTS = "vaults";
+const UNLOCK_KEYS = "unlockKeys";
 
 /** Every store holding per-account data, so forgetting an account clears all
  *  of it. */
-const ACCOUNT_STORES = [ACCOUNTS, VAULTS];
+const ACCOUNT_STORES = [ACCOUNTS, VAULTS, UNLOCK_KEYS];
 
 export function accountId(username: string, serverNs: string | null): string {
   return JSON.stringify([serverNs ?? "", username]);
@@ -48,7 +55,16 @@ function openDb(): Promise<IDBDatabase> {
         if (!db.objectStoreNames.contains(name))
           db.createObjectStore(name, { keyPath: "id" });
     };
-    request.onsuccess = () => resolve(request.result);
+    request.onsuccess = () => {
+      const db = request.result;
+      // let a newer version of the app (e.g. in another tab) upgrade the
+      // database; the next access here reopens it
+      db.onversionchange = () => {
+        db.close();
+        dbPromise = null;
+      };
+      resolve(db);
+    };
     request.onerror = () => {
       dbPromise = null;
       reject(request.error);
@@ -107,6 +123,26 @@ export async function getVault(id: string): Promise<CachedVault | undefined> {
 export async function putVault(vault: CachedVault): Promise<void> {
   await transaction([VAULTS], "readwrite", (tx) => {
     tx.objectStore(VAULTS).put(vault);
+  });
+}
+
+export async function getUnlockKey<T extends StoredUnlockKey>(
+  id: string,
+): Promise<T | undefined> {
+  return transaction<T>([UNLOCK_KEYS], "readonly", (tx) =>
+    tx.objectStore(UNLOCK_KEYS).get(id),
+  );
+}
+
+export async function putUnlockKey(key: StoredUnlockKey): Promise<void> {
+  await transaction([UNLOCK_KEYS], "readwrite", (tx) => {
+    tx.objectStore(UNLOCK_KEYS).put(key);
+  });
+}
+
+export async function deleteUnlockKey(id: string): Promise<void> {
+  await transaction([UNLOCK_KEYS], "readwrite", (tx) => {
+    tx.objectStore(UNLOCK_KEYS).delete(id);
   });
 }
 
