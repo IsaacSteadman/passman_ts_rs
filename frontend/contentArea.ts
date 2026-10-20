@@ -1,9 +1,11 @@
 import type { LoginResult } from "./loginArea";
 import {
   credentialHeaders,
+  decodeVault,
   deriveUserKeys,
   readServerAccessParams,
 } from "./loginArea";
+import { mergeVaults, vaultsEqual } from "./merge";
 import {
   type VaultRoot,
   type PassTableData,
@@ -22,6 +24,9 @@ import { encryptBlob } from "./passman_crypto_glue";
 export interface ContentAreaHandle {
   show(result: LoginResult): void;
   getCurrentData(): VaultRoot | null;
+  /** Records changes made to the data outside the tables (history), shows
+   *  them and saves. */
+  recordChanges(entries: HistoryEntry[]): Promise<void>;
 }
 
 export function initContentArea(
@@ -51,78 +56,237 @@ export function initContentArea(
   let currentServerNs: string | null = null;
   let currentLastModified: string | null = null;
   let currentData: VaultRoot | null = null;
+  // The server version this session last loaded or saved: its ETag (sent as
+  // If-Match so a save never overwrites a newer one) and its contents (the
+  // base for merging when another session saved first).
+  let currentEtag: string | null = null;
+  let baseData: VaultRoot | null = null;
+  // Set when a merge found changes made in both sessions; saving is paused
+  // until the user loads the latest version.
+  let conflict: FetchedVault | null = null;
   // Throttle: only fetch from server if this many ms have elapsed since last fetch.
   const FETCH_THROTTLE_MS = 60 * 60 * 1000; // 1 hour
   let lastFetchTime = 0;
+
+  // Shown above the vault while `conflict` is set.
+  const conflictDiv = document.createElement("div");
+  conflictDiv.className = "pm-conflict";
+  conflictDiv.setAttribute("role", "alert");
+  conflictDiv.style.display = "none";
+  dataDiv.before(conflictDiv);
 
   // ── Serial save queue ────────────────────────────────────────────────────
   // Prevents concurrent PUTs from racing; each save chains onto the previous.
   let pendingSave: Promise<void> = Promise.resolve();
 
-  async function saveVault(): Promise<void> {
-    pendingSave = pendingSave.then(async () => {
-      if (
-        currentEncryptionKey == null ||
-        currentUsername == null ||
-        currentAuthKeyB64 == null ||
-        currentServerPass == null ||
-        currentData == null
-      )
-        return;
-
-      statSpan.textContent = "Saving…";
-      try {
-        const plaintext = new TextEncoder().encode(JSON.stringify(currentData));
-        const blob = encryptBlob(currentEncryptionKey, plaintext);
-
-        const url = new URL("/pass-table", window.location.origin);
-        url.searchParams.set("username", currentUsername);
-        if (currentServerNs != null)
-          url.searchParams.set("server_ns", currentServerNs);
-
-        const headers: Record<string, string> = {
-          ...credentialHeaders(currentAuthKeyB64, currentServerPass),
-          "Content-Type": "application/octet-stream",
-          "Content-Length": String(blob.byteLength),
-        };
-        if (currentLastModified != null)
-          headers["If-Unmodified-Since"] = currentLastModified;
-
-        const response = await fetch(url.toString(), {
-          method: "PUT",
-          headers,
-          body: blob,
-        });
-
-        if (!response.ok) {
-          let body: unknown;
-          try {
-            body = await response.json();
-          } catch {
-            body = await response.text();
-          }
-          statSpan.textContent = `Save failed (${response.status}): ${JSON.stringify(body)}`;
-          return;
-        }
-
-        currentLastModified =
-          response.headers.get("Last-Modified") ?? currentLastModified;
-        statSpan.textContent = currentLastModified
-          ? `Last saved: ${currentLastModified}`
-          : "Saved";
-      } catch (e) {
-        statSpan.textContent = `Save error: ${e}`;
-      }
-    });
+  function enqueue(task: () => Promise<void>): Promise<void> {
+    pendingSave = pendingSave.then(task);
     return pendingSave;
   }
 
-  // ── Fetch latest vault (refresh If-Unmodified-Since before editing) ───────
-  // Returns null if no fetch was needed / no conflict, "conflict" if the server
-  // has a newer version than we last saw, or an error string on failure.
-  async function fetchLatestVault(): Promise<string | null> {
+  async function describeError(response: Response): Promise<string> {
+    let body: unknown;
+    try {
+      body = await response.json();
+    } catch {
+      body = await response.text();
+    }
+    return `(${response.status}): ${JSON.stringify(body)}`;
+  }
+
+  interface FetchedVault {
+    data: VaultRoot;
+    etag: string | null;
+    lastModified: string | null;
+  }
+
+  /** Downloads and decrypts the current server version, or returns an error
+   *  message. */
+  async function fetchVault(): Promise<FetchedVault | string> {
     if (
       currentEncryptionKey == null ||
+      currentUsername == null ||
+      currentAuthKeyB64 == null ||
+      currentServerPass == null
+    )
+      return "Not logged in";
+    try {
+      const url = new URL("/pass-table", window.location.origin);
+      url.searchParams.set("username", currentUsername);
+      if (currentServerNs != null)
+        url.searchParams.set("server_ns", currentServerNs);
+      const response = await fetch(url.toString(), {
+        headers: credentialHeaders(currentAuthKeyB64, currentServerPass),
+      });
+      if (!response.ok)
+        return `Refresh failed ${await describeError(response)}`;
+      const blob = new Uint8Array(await response.arrayBuffer());
+      return {
+        data: decodeVault(currentEncryptionKey, blob),
+        etag: response.headers.get("ETag"),
+        lastModified: response.headers.get("Last-Modified"),
+      };
+    } catch (e) {
+      return `Refresh error: ${e}`;
+    }
+  }
+
+  /** Makes `latest` the new base, with `merged` as this session's data. */
+  function adoptServerVersion(merged: VaultRoot, latest: FetchedVault): void {
+    currentData = merged;
+    baseData = latest.data;
+    currentEtag = latest.etag;
+    currentLastModified = latest.lastModified;
+    render();
+  }
+
+  /** After a save was refused because another session saved first: merges
+   *  that session's changes into this one. Returns false (and pauses saving)
+   *  if the merge found conflicts or the latest version couldn't be loaded. */
+  async function mergeLatest(): Promise<boolean> {
+    statSpan.textContent = "Merging changes from another session…";
+    const latest = await fetchVault();
+    if (typeof latest === "string") {
+      statSpan.textContent = `⚠ ${latest}`;
+      return false;
+    }
+    if (currentData == null || baseData == null) return false;
+    const { merged, conflicts } = mergeVaults(
+      baseData,
+      currentData,
+      latest.data,
+    );
+    if (conflicts.length > 0) {
+      conflict = latest;
+      showConflict(conflicts);
+      return false;
+    }
+    adoptServerVersion(merged, latest);
+    return true;
+  }
+
+  function showConflict(conflicts: string[]): void {
+    statSpan.textContent = "⚠ Saving paused: conflicting changes";
+    conflictDiv.innerHTML = "";
+    const intro = document.createElement("p");
+    intro.textContent =
+      "This vault was changed in another session, and some of the same items were changed here too. Saving is paused until you load the latest version. Your other changes will be kept; for these items the other session's version will be used:";
+    const list = document.createElement("ul");
+    const SHOWN = 10;
+    for (const c of conflicts.slice(0, SHOWN)) {
+      const li = document.createElement("li");
+      li.textContent = c;
+      list.appendChild(li);
+    }
+    if (conflicts.length > SHOWN) {
+      const li = document.createElement("li");
+      li.textContent = `…and ${conflicts.length - SHOWN} more`;
+      list.appendChild(li);
+    }
+    const loadButton = document.createElement("button");
+    loadButton.type = "button";
+    loadButton.className = "pm-btn";
+    loadButton.textContent = "Load latest version";
+    loadButton.addEventListener("click", () => resolveConflict());
+    conflictDiv.append(intro, list, loadButton);
+    conflictDiv.style.display = "";
+  }
+
+  function hideConflict(): void {
+    conflict = null;
+    conflictDiv.innerHTML = "";
+    conflictDiv.style.display = "none";
+  }
+
+  /** Takes the other session's version for the conflicting items, keeps this
+   *  session's other changes, and saves the result. */
+  async function resolveConflict(): Promise<void> {
+    const latest = conflict;
+    if (latest == null || currentData == null || baseData == null) return;
+    hideConflict();
+    // re-merged now in case of edits made while saving was paused; the
+    // conflicts resolve to the server's version
+    const { merged } = mergeVaults(baseData, currentData, latest.data);
+    adoptServerVersion(merged, latest);
+    if (!vaultsEqual(merged, latest.data)) await saveVault();
+  }
+
+  async function saveVault(): Promise<void> {
+    return enqueue(async () => {
+      // a save refused because another session saved first is retried after
+      // merging; a few attempts cover sessions that keep saving meanwhile
+      for (let attempt = 0; attempt < 3; attempt++) {
+        if (
+          currentEncryptionKey == null ||
+          currentUsername == null ||
+          currentAuthKeyB64 == null ||
+          currentServerPass == null ||
+          currentData == null
+        )
+          return;
+        if (conflict != null) {
+          statSpan.textContent =
+            "⚠ Saving paused: load the latest version first";
+          return;
+        }
+
+        statSpan.textContent = "Saving…";
+        try {
+          const json = JSON.stringify(currentData);
+          const blob = encryptBlob(
+            currentEncryptionKey,
+            new TextEncoder().encode(json),
+          );
+
+          const url = new URL("/pass-table", window.location.origin);
+          url.searchParams.set("username", currentUsername);
+          if (currentServerNs != null)
+            url.searchParams.set("server_ns", currentServerNs);
+
+          const headers: Record<string, string> = {
+            ...credentialHeaders(currentAuthKeyB64, currentServerPass),
+            "Content-Type": "application/octet-stream",
+            "Content-Length": String(blob.byteLength),
+          };
+          if (currentEtag != null) headers["If-Match"] = currentEtag;
+
+          const response = await fetch(url.toString(), {
+            method: "PUT",
+            headers,
+            body: blob,
+          });
+
+          if (response.status === 412) {
+            if (!(await mergeLatest())) return;
+            continue;
+          }
+          if (!response.ok) {
+            statSpan.textContent = `Save failed ${await describeError(response)}`;
+            return;
+          }
+
+          currentEtag = response.headers.get("ETag");
+          currentLastModified = response.headers.get("Last-Modified");
+          baseData = JSON.parse(json) as VaultRoot;
+          statSpan.textContent = currentLastModified
+            ? `Last saved: ${currentLastModified}`
+            : "Saved";
+          return;
+        } catch (e) {
+          statSpan.textContent = `Save error: ${e}`;
+          return;
+        }
+      }
+      statSpan.textContent =
+        "⚠ Save failed: the vault keeps changing in another session";
+    });
+  }
+
+  // ── Background check for a newer version (when an edit starts) ──────────
+  // Returns a notice to show, or null. It doesn't merge here, since that
+  // re-renders and would cancel the edit being started; the next save merges.
+  async function checkForNewerVersion(): Promise<string | null> {
+    if (
       currentUsername == null ||
       currentAuthKeyB64 == null ||
       currentServerPass == null
@@ -144,11 +308,9 @@ export function initContentArea(
       if (!response.ok) return `Refresh failed (${response.status})`;
 
       lastFetchTime = Date.now();
-      const newLastModified = response.headers.get("Last-Modified");
-      if (newLastModified && newLastModified !== currentLastModified) {
-        currentLastModified = newLastModified;
-        return "conflict";
-      }
+      const etag = response.headers.get("ETag");
+      if (etag != null && etag !== currentEtag)
+        return "Vault updated in another session — those changes will be merged when you save";
       return null;
     } catch (e) {
       return `Refresh error: ${e}`;
@@ -473,13 +635,8 @@ export function initContentArea(
   const callbacks: PassTableCallbacks = {
     onFetchBeforeEdit: () => {
       // Fire a background refresh — do NOT block edit mode entry on it.
-      fetchLatestVault().then((result) => {
-        if (result === "conflict") {
-          statSpan.textContent =
-            "⚠ Vault updated in another session — saving will overwrite those changes";
-        } else if (result != null) {
-          statSpan.textContent = `⚠ ${result}`;
-        }
+      checkForNewerVersion().then((notice) => {
+        if (notice != null) statSpan.textContent = `⚠ ${notice}`;
       });
       return Promise.resolve();
     },
@@ -623,7 +780,7 @@ export function initContentArea(
       currentEncryptionKey == null ||
       currentAuthKeyB64 == null ||
       currentData == null ||
-      currentLastModified == null
+      currentEtag == null
     ) {
       chgPassStatus.textContent = "Not logged in.";
       return;
@@ -662,58 +819,80 @@ export function initContentArea(
       return;
     }
 
-    chgPassStatus.textContent = "Encrypting…";
-    const plaintext = new TextEncoder().encode(JSON.stringify(currentData));
-    const blob = encryptBlob(newEncryptionKey, plaintext);
-
     const { serverPass, serverNs } = readServerAccessParams();
     const url = new URL("/pass-table-new-pass", window.location.origin);
     url.searchParams.set("username", currentUsername);
     if (serverNs != null) url.searchParams.set("server_ns", serverNs);
 
-    chgPassStatus.textContent = "Saving…";
-    let response: Response;
-    try {
-      response = await fetch(url.toString(), {
-        method: "PUT",
-        headers: {
-          ...credentialHeaders(oldAuthKeyB64, serverPass),
-          "Passman-New-Auth-Key": newAuthKeyB64,
-          "Content-Type": "application/octet-stream",
-          "Content-Length": String(blob.byteLength),
-          "If-Unmodified-Since": currentLastModified,
-        },
-        body: blob,
-      });
-    } catch (e) {
-      chgPassStatus.textContent = `Network error: ${e}`;
-      return;
-    }
+    // queued with saves, so a save still using the old key can't run after it
+    await enqueue(async () => {
+      // if another session saved first, merge its changes and try once more
+      for (let attempt = 0; attempt < 2; attempt++) {
+        if (currentData == null || currentEtag == null) return;
+        if (conflict != null) {
+          chgPassStatus.textContent =
+            "Load the latest version of the vault (see above), then try again.";
+          return;
+        }
+        chgPassStatus.textContent = "Encrypting…";
+        const json = JSON.stringify(currentData);
+        const blob = encryptBlob(
+          newEncryptionKey,
+          new TextEncoder().encode(json),
+        );
 
-    if (!response.ok) {
-      let body: unknown;
-      try {
-        body = await response.json();
-      } catch {
-        body = await response.text();
+        chgPassStatus.textContent = "Saving…";
+        let response: Response;
+        try {
+          response = await fetch(url.toString(), {
+            method: "PUT",
+            headers: {
+              ...credentialHeaders(oldAuthKeyB64, serverPass),
+              "Passman-New-Auth-Key": newAuthKeyB64,
+              "Content-Type": "application/octet-stream",
+              "Content-Length": String(blob.byteLength),
+              "If-Match": currentEtag,
+            },
+            body: blob,
+          });
+        } catch (e) {
+          chgPassStatus.textContent = `Network error: ${e}`;
+          return;
+        }
+
+        if (response.status === 412) {
+          chgPassStatus.textContent = "Merging changes from another session…";
+          if (!(await mergeLatest())) {
+            chgPassStatus.textContent =
+              "The vault was changed in another session; resolve that, then try again.";
+            return;
+          }
+          continue;
+        }
+        if (!response.ok) {
+          chgPassStatus.textContent = `Change password failed ${await describeError(response)}`;
+          return;
+        }
+
+        currentAuthKeyB64 = newAuthKeyB64;
+        currentEncryptionKey = newEncryptionKey;
+        currentEtag = response.headers.get("ETag");
+        currentLastModified = response.headers.get("Last-Modified");
+        baseData = JSON.parse(json) as VaultRoot;
+        statSpan.textContent = currentLastModified
+          ? `Last saved: ${currentLastModified}`
+          : "Saved";
+
+        currentPassInput.value = "";
+        newPassChgInput.value = "";
+        confirmNewPassChgInput.value = "";
+        changePassDetails.open = false;
+        chgPassStatus.textContent = "Password changed successfully.";
+        return;
       }
-      chgPassStatus.textContent = `Change password failed (${response.status}): ${JSON.stringify(body)}`;
-      return;
-    }
-
-    currentAuthKeyB64 = newAuthKeyB64;
-    currentEncryptionKey = newEncryptionKey;
-    currentLastModified =
-      response.headers.get("Last-Modified") ?? currentLastModified;
-    statSpan.textContent = currentLastModified
-      ? `Last saved: ${currentLastModified}`
-      : "Saved";
-
-    currentPassInput.value = "";
-    newPassChgInput.value = "";
-    confirmNewPassChgInput.value = "";
-    changePassDetails.open = false;
-    chgPassStatus.textContent = "Password changed successfully.";
+      chgPassStatus.textContent =
+        "Change password failed: the vault keeps changing in another session.";
+    });
   });
 
   logoutButton.addEventListener("click", () => {
@@ -724,6 +903,9 @@ export function initContentArea(
     currentServerNs = null;
     currentLastModified = null;
     currentData = null;
+    currentEtag = null;
+    baseData = null;
+    hideConflict();
     historyDetails = null;
     lastFetchTime = 0;
     // hiding is not enough: the decrypted vault would stay in the DOM
@@ -746,6 +928,15 @@ export function initContentArea(
       return currentData;
     },
 
+    async recordChanges(entries: HistoryEntry[]): Promise<void> {
+      if (!currentData) return;
+      currentData.history.push(...entries);
+      if (currentData.history.length > 100)
+        currentData.history.splice(0, currentData.history.length - 100);
+      render();
+      await saveVault();
+    },
+
     show({
       data,
       lastModified,
@@ -754,6 +945,7 @@ export function initContentArea(
       authKeyB64,
       serverPass,
       serverNs,
+      etag,
     }: LoginResult): void {
       currentEncryptionKey = encryptionKey;
       currentUsername = username;
@@ -762,6 +954,8 @@ export function initContentArea(
       currentServerNs = serverNs;
       currentLastModified = lastModified;
       currentData = data;
+      currentEtag = etag;
+      baseData = structuredClone(data);
       contentDiv.style.display = "";
       render();
     },

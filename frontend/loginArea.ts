@@ -1,5 +1,9 @@
 import { decryptBlob, deriveKey, SALT_LEN } from "./passman_crypto_glue";
-import { type VaultRoot } from "./PassTable";
+import {
+  type CellValue,
+  type PassTableColumn,
+  type VaultRoot,
+} from "./PassTable";
 
 export interface LoginResult {
   data: VaultRoot;
@@ -10,6 +14,49 @@ export interface LoginResult {
   authKeyB64: string;
   serverPass: string;
   serverNs: string | null;
+  /** The vault version, sent back as If-Match when saving. */
+  etag: string | null;
+}
+
+/** Vaults saved before tables had ids were a bare array of these. */
+type LegacyTable = {
+  name?: string;
+  columns?: {
+    label?: string;
+    type?: PassTableColumn["type"];
+    data?: CellValue[];
+  }[];
+};
+
+/** Decrypts and parses a vault downloaded from the server (throws on failure). */
+export function decodeVault(
+  encryptionKey: Uint8Array,
+  blob: Uint8Array,
+): VaultRoot {
+  const plaintext = decryptBlob(encryptionKey, blob);
+  const parsed: unknown = JSON.parse(new TextDecoder().decode(plaintext));
+  if (!Array.isArray(parsed)) return parsed as VaultRoot;
+  // Migration: old format (PassTableData[] without ids)
+  return {
+    tables: (parsed as LegacyTable[]).map((table) => {
+      const numRows = table.columns?.[0]?.data?.length ?? 0;
+      return {
+        id: crypto.randomUUID(),
+        rowIds: Array.from({ length: numRows }, () => crypto.randomUUID()),
+        name: table.name ?? "Table",
+        columns: (table.columns ?? []).map(
+          (col) =>
+            ({
+              id: crypto.randomUUID(),
+              label: col.label ?? "Column",
+              type: col.type ?? "textarea",
+              data: col.data ?? [],
+            }) as PassTableColumn,
+        ),
+      };
+    }),
+    history: [],
+  };
 }
 
 function getAlg() {
@@ -152,36 +199,12 @@ export function initLoginArea(
     }
 
     const lastModified = response.headers.get("Last-Modified");
+    const etag = response.headers.get("ETag");
     const blob = new Uint8Array(await response.arrayBuffer());
 
     let data: VaultRoot;
     try {
-      const plaintext = decryptBlob(encryptionKey, blob);
-      const parsed: unknown = JSON.parse(new TextDecoder().decode(plaintext));
-      if (Array.isArray(parsed)) {
-        // Migration: old format (PassTableData[] without ids)
-        data = {
-          tables: (parsed as any[]).map((table: any) => {
-            const numRows = table.columns?.[0]?.data?.length ?? 0;
-            return {
-              id: crypto.randomUUID(),
-              rowIds: Array.from({ length: numRows }, () =>
-                crypto.randomUUID(),
-              ),
-              name: table.name ?? "Table",
-              columns: (table.columns ?? []).map((col: any) => ({
-                id: crypto.randomUUID(),
-                label: col.label ?? "Column",
-                type: col.type ?? "textarea",
-                data: col.data ?? [],
-              })),
-            };
-          }),
-          history: [],
-        };
-      } else {
-        data = parsed as VaultRoot;
-      }
+      data = decodeVault(encryptionKey, blob);
     } catch (e) {
       errorPanel.textContent = `Decryption or parse failed: ${e}`;
       return;
@@ -196,6 +219,7 @@ export function initLoginArea(
       authKeyB64,
       serverPass,
       serverNs,
+      etag,
     });
   });
 }

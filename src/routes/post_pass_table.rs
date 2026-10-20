@@ -2,7 +2,7 @@ use crate::routes::base::{
     AUTH_KEY_HEADER, AppState, UserDataHeader, WritingFile, auth_key_header, get_content_length,
     policy_params, validate_password, validate_username,
 };
-use actix_web::{HttpRequest, HttpResponse, Responder, post, web};
+use actix_web::{HttpRequest, HttpResponse, Responder, http::header, post, web};
 use futures_util::StreamExt;
 use serde::Deserialize;
 use serde_json::json;
@@ -178,13 +178,17 @@ pub async fn route(
             }
         }
     }
-    if let Err(e) = wf.close().replace().await {
-        return e;
-    }
+    let replaced = match wf.close().replace(None).await {
+        Err(e) => return e,
+        Ok(o) => o,
+    };
     len_checker.commit();
 
-    HttpResponse::Created().json(json!({
-        "type": "SUCCESS",
-        "message": "successfully created new account and saved password table"
-    }))
+    HttpResponse::Created()
+        .insert_header(header::LastModified(replaced.last_modified))
+        .insert_header(header::ETag(replaced.etag))
+        .json(json!({
+            "type": "SUCCESS",
+            "message": "successfully created new account and saved password table"
+        }))
 }

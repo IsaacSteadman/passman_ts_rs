@@ -317,6 +317,60 @@ pub fn http_date(time: SystemTime) -> header::HttpDate {
     header::HttpDate::from(UNIX_EPOCH + Duration::from_secs(secs))
 }
 
+/// A vault's version: `Last-Modified` for display and a strong `ETag` for
+/// conflict detection. The ETag uses the nanosecond mtime, which `finish_write`
+/// makes strictly increase on every save.
+pub fn vault_version(
+    metadata: &Metadata,
+) -> std::io::Result<(header::HttpDate, header::EntityTag)> {
+    let modified = metadata.modified()?;
+    let nanos = modified
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    Ok((
+        http_date(modified),
+        header::EntityTag::new_strong(format!("{nanos:x}-{:x}", metadata.len())),
+    ))
+}
+
+/// Saves must say which version they replace (`If-Match` with the ETag the
+/// client last loaded or saved); this checks it against the current one.
+pub fn check_if_match(
+    if_match: &header::IfMatch,
+    current: &header::EntityTag,
+) -> Result<(), HttpResponse> {
+    let matches = match if_match {
+        header::IfMatch::Any => true,
+        header::IfMatch::Items(tags) => tags.iter().any(|tag| tag.strong_eq(current)),
+    };
+    if matches {
+        Ok(())
+    } else {
+        Err(HttpResponse::PreconditionFailed().json(json!({
+            "type": "E_PRECONDITION_FAILED",
+            "header": "If-Match",
+            "message": "the vault was changed by another session"
+        })))
+    }
+}
+
+/// actix parses an absent `If-Match` as an empty list, so both mean missing.
+pub fn required_if_match(
+    if_match: Option<web::Header<header::IfMatch>>,
+) -> Result<header::IfMatch, HttpResponse> {
+    match if_match.map(web::Header::into_inner) {
+        Some(header::IfMatch::Items(tags)) if tags.is_empty() => {}
+        Some(if_match) => return Ok(if_match),
+        None => {}
+    }
+    Err(HttpResponse::PreconditionRequired().json(json!({
+        "type": "E_PRECONDITION_REQUIRED",
+        "header_required": "If-Match",
+        "message": "the condition header is required to be specified"
+    })))
+}
+
 fn required_header<'a>(req: &'a HttpRequest, name: &'static str) -> Result<&'a str, HttpResponse> {
     match req.headers().get(name).map(|v| v.to_str()) {
         Some(Ok(s)) => Ok(s),
@@ -554,23 +608,68 @@ struct ReadyToReplaceInner {
 
 pub struct ReadyToReplace(Option<ReadyToReplaceInner>);
 
+/// Flushes the written file to disk (`sync_all` also waits for tokio's
+/// in-flight background write, so the file is complete before the rename and
+/// the lock release) and makes its mtime later than `previous`, the mtime of
+/// the version it replaces, so the new version always gets a new ETag even
+/// within one filesystem timestamp tick.
+async fn finish_write(
+    wf: &mut tokio::fs::File,
+    previous: Option<SystemTime>,
+) -> std::io::Result<Metadata> {
+    wf.sync_all().await?;
+    let metadata = wf.metadata().await?;
+    let Some(previous) = previous else {
+        return Ok(metadata);
+    };
+    if metadata.modified()? > previous {
+        return Ok(metadata);
+    }
+    let file = wf.try_clone().await?.into_std().await;
+    let bumped = previous + Duration::from_micros(1);
+    tokio::task::spawn_blocking(move || {
+        file.set_modified(bumped)?;
+        file.sync_all()
+    })
+    .await??;
+    let metadata = wf.metadata().await?;
+    if metadata.modified()? > previous {
+        Ok(metadata)
+    } else {
+        Err(std::io::Error::other(
+            "filesystem mtime is too coarse to version the vault",
+        ))
+    }
+}
+
 impl ReadyToReplace {
-    pub async fn replace(&mut self) -> Result<Replaced, HttpResponse> {
-        if let Some(inner) = self.0.take() {
-            // waits for tokio's in-flight background write, then flushes to
-            // disk, so the renamed file is complete before the lock is released
-            if let Err(e) = inner.wf.sync_all().await {
-                eprintln!(
-                    "Error occured attempting to sync write file\n  e={e:?}\n  path={:?}",
-                    inner.write_file_path
-                );
-                // put it back so Drop removes the temporary file
-                self.0 = Some(inner);
-                return Err(HttpResponse::InternalServerError().json(json!({
-                    "type": "E_USER_WRITE",
-                    "message": "Failed to write data to user file"
-                })));
-            }
+    /// `previous_modified` is the mtime of the file being replaced (`None`
+    /// when creating it).
+    pub async fn replace(
+        &mut self,
+        previous_modified: Option<SystemTime>,
+    ) -> Result<Replaced, HttpResponse> {
+        if let Some(mut inner) = self.0.take() {
+            // read while still holding the write lock (rename keeps the mtime),
+            // so this is the version this request wrote, not a later one
+            let version = finish_write(&mut inner.wf, previous_modified)
+                .await
+                .and_then(|metadata| vault_version(&metadata));
+            let (last_modified, etag) = match version {
+                Ok(o) => o,
+                Err(e) => {
+                    eprintln!(
+                        "Error occured attempting to finish write file\n  e={e:?}\n  path={:?}",
+                        inner.write_file_path
+                    );
+                    // put it back so Drop removes the temporary file
+                    self.0 = Some(inner);
+                    return Err(HttpResponse::InternalServerError().json(json!({
+                        "type": "E_USER_WRITE",
+                        "message": "Failed to write data to user file"
+                    })));
+                }
+            };
             let ReadyToReplaceInner {
                 wf,
                 guard,
@@ -578,17 +677,6 @@ impl ReadyToReplace {
                 write_file_path,
                 ..
             } = inner;
-            // read while still holding the write lock (rename keeps the mtime),
-            // so this is the version this request wrote, not a later one
-            let last_modified = match wf.metadata().await.and_then(|m| m.modified()) {
-                Ok(o) => Some(http_date(o)),
-                Err(e) => {
-                    eprintln!(
-                        "Error occured attempting to fetch modified of write file\n  e={e:?}\n  path={write_file_path:?}"
-                    );
-                    None
-                }
-            };
             drop(wf);
             match tokio::fs::rename(&write_file_path, &replace_target_path).await {
                 Err(e) => {
@@ -604,6 +692,7 @@ impl ReadyToReplace {
                     guard,
                     replace_target_path,
                     last_modified,
+                    etag,
                 }),
             }
         } else {
@@ -642,13 +731,40 @@ impl Drop for ReadyToReplace {
 pub struct Replaced {
     guard: OwnedRwLockWriteGuard<UserT>,
     replace_target_path: PathBuf,
-    /// `None` if the mtime could not be read
-    pub last_modified: Option<header::HttpDate>,
+    pub last_modified: header::HttpDate,
+    pub etag: header::EntityTag,
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_b64, parse_b64_digit};
+    use super::{finish_write, parse_b64, parse_b64_digit, vault_version};
+    use std::time::{Duration, SystemTime};
+    use tokio::io::AsyncWriteExt;
+
+    /// A save in the same filesystem timestamp tick as the version it replaces
+    /// (or after the clock stepped back) must still get a newer mtime, and so a
+    /// different ETag.
+    #[tokio::test]
+    async fn finish_write_moves_mtime_past_previous() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut f = tokio::fs::File::create(dir.path().join("vault"))
+            .await
+            .unwrap();
+        f.write_all(b"data").await.unwrap();
+        f.sync_all().await.unwrap();
+        let written = f.metadata().await.unwrap();
+        for previous in [
+            written.modified().unwrap(),
+            SystemTime::now() + Duration::from_secs(5),
+        ] {
+            let metadata = finish_write(&mut f, Some(previous)).await.unwrap();
+            assert!(metadata.modified().unwrap() > previous);
+            assert_ne!(
+                vault_version(&metadata).unwrap().1,
+                vault_version(&written).unwrap().1
+            );
+        }
+    }
 
     /// Every character in the standard 64-char base64 alphabet must decode to
     /// its correct 6-bit value (0–63).

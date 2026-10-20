@@ -54,6 +54,7 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   const passgenHandle = initPassgenPanel(
     () => contentHandle.getCurrentData()?.tables ?? null,
+    (entries) => contentHandle.recordChanges(entries),
   );
 
   initLoginArea(errorPanel, (result: LoginResult) => {

@@ -1,6 +1,6 @@
 use crate::routes::base::{
     AUTH_KEY_HEADER, AppState, GetUser, GetWillMutUser, WritingFile, auth_key_header,
-    get_content_length, http_date, policy_params,
+    check_if_match, get_content_length, policy_params, required_if_match, vault_version,
 };
 use actix_web::{HttpRequest, HttpResponse, Responder, http::header, put, web};
 use futures_util::StreamExt;
@@ -18,21 +18,14 @@ struct PutPassTableParams {
 pub async fn route(
     app_state: web::Data<AppState>,
     query: web::Query<PutPassTableParams>,
-    if_unmodified_since: Option<web::Header<header::IfUnmodifiedSince>>,
+    if_match: Option<web::Header<header::IfMatch>>,
     req: HttpRequest,
     mut payload: web::Payload,
 ) -> impl Responder {
-    eprintln!(
-        "PUT /pass-table\n  query = {query:?}\n  if_unmodified_since = {if_unmodified_since:?}"
-    );
-    let header::IfUnmodifiedSince(if_unmodified_since) = if let Some(s) = if_unmodified_since {
-        s.into_inner()
-    } else {
-        return HttpResponse::PreconditionRequired().json(json!({
-            "type": "E_PRECONDITION_REQUIRED",
-            "header_required": "If-Unmodified-Since",
-            "message": "the condition header is required to be specified"
-        }));
+    eprintln!("PUT /pass-table\n  query = {query:?}\n  if_match = {if_match:?}");
+    let if_match = match required_if_match(if_match) {
+        Err(e) => return e,
+        Ok(o) => o,
     };
     let content_length = match get_content_length(&req) {
         Err(e) => return e,
@@ -78,8 +71,8 @@ pub async fn route(
         Ok(o) => o,
     };
     drop(read_file);
-    let last_modified = http_date(match metadata.modified() {
-        Ok(o) => o,
+    let current_etag = match vault_version(&metadata) {
+        Ok((_, etag)) => etag,
         Err(e) => {
             eprintln!(
                 "Error occured attempting to fetch modified\n  metadata={metadata:?}\n  username={username:?}\n  path={user_path:?}\n  e={e:?}"
@@ -89,13 +82,9 @@ pub async fn route(
                 "message": "Failed to read user file metadata last modified"
             }));
         }
-    });
-    if last_modified > if_unmodified_since {
-        return HttpResponse::PreconditionFailed().json(json!({
-            "type": "E_PRECONDITION_FAILED",
-            "header": "If-Unmodified-Since",
-            "message": "the resource has been modified since the specified time"
-        }));
+    };
+    if let Err(e) = check_if_match(&if_match, &current_etag) {
+        return e;
     }
     let write_guard = match OwnedRwLockReadGuard::upgrade(read_guard).await {
         Err(_) => {
@@ -164,7 +153,7 @@ pub async fn route(
                 "message": "request payload is smaller than specified Content-Length"
             }));
         }
-        replaced = match wf.close().replace().await {
+        replaced = match wf.close().replace(metadata.modified().ok()).await {
             Err(e) => return e,
             Ok(o) => o,
         };
@@ -211,16 +200,15 @@ pub async fn route(
                 }
             }
         }
-        replaced = match wf.close().replace().await {
+        replaced = match wf.close().replace(metadata.modified().ok()).await {
             Err(e) => return e,
             Ok(o) => o,
         };
     }
-    // the client sends this back as If-Unmodified-Since on its next save
+    // the client sends the ETag back as If-Match on its next save
     let mut resp = HttpResponse::Ok();
-    if let Some(lm) = replaced.last_modified {
-        resp.insert_header(header::LastModified(lm));
-    }
+    resp.insert_header(header::LastModified(replaced.last_modified));
+    resp.insert_header(header::ETag(replaced.etag));
     resp.json(json!({
         "type": "SUCCESS",
         "message": "successfully saved password table"

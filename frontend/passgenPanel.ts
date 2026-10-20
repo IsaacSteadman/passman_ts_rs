@@ -5,18 +5,25 @@ import {
   estimateBits,
   estimateChars,
 } from "./passgen_util";
-import { type PassTableData, copyTextToClipboard } from "./PassTable";
+import {
+  type HistoryEntry,
+  type PassTableData,
+  copyTextToClipboard,
+} from "./PassTable";
 
 const DEFAULT_SYMBOLS = "!@#$%^&*()-_=+[]{}|;:',.<>?/`~\"\\";
 
-/** Sets up the passgen panel. `getTableData` is called each time to get the current live data. */
 export interface PassgenPanelHandle {
   /** Forgets the generated password and the vault's table names (logout). */
   clear(): void;
 }
 
+/** Sets up the passgen panel. `getTableData` is called each time to get the
+ *  current live data; `recordChanges` records (and saves) what "Add to table"
+ *  changed in it. */
 export function initPassgenPanel(
   getTableData: () => PassTableData[] | null,
+  recordChanges: (entries: HistoryEntry[]) => Promise<void>,
 ): PassgenPanelHandle {
   const panel = document.querySelector("div#passgen-panel") as HTMLDivElement;
   const form = panel.querySelector("form")!;
@@ -249,6 +256,8 @@ export function initPassgenPanel(
   // ----- Populate table select -----
   function refreshTableSelect(): void {
     const data = getTableData();
+    // runs on every mouseover in the panel, so keep the user's choice
+    const selected = addTableSelect.value;
     while (addTableSelect.options.length > 1) addTableSelect.remove(1);
     if (data) {
       for (const table of data) {
@@ -257,6 +266,8 @@ export function initPassgenPanel(
         opt.textContent = table.name;
         addTableSelect.appendChild(opt);
       }
+      if (data.some((t) => t.name === selected))
+        addTableSelect.value = selected;
     }
   }
 
@@ -288,6 +299,8 @@ export function initPassgenPanel(
       return;
     }
 
+    const timestamp = new Date().toISOString();
+    const entries: HistoryEntry[] = [];
     let col = table.columns.find((c) => c.type === "password");
     if (!col) {
       col = {
@@ -301,6 +314,14 @@ export function initPassgenPanel(
         col.data.push({ type: "password", value: "" });
       }
       table.columns.push(col);
+      entries.push({
+        kind: "col-add",
+        timestamp,
+        tableId: table.id,
+        tableName: table.name,
+        colId: col.id,
+        colLabel: col.label,
+      });
     }
     if (col.type === "password") {
       const newRowId = crypto.randomUUID();
@@ -313,8 +334,17 @@ export function initPassgenPanel(
         else if (c.type === "password")
           c.data.push({ type: "password", value: "" });
       }
+      entries.push({
+        kind: "row-add",
+        timestamp,
+        tableId: table.id,
+        tableName: table.name,
+        rowId: newRowId,
+        rowIndex: table.rowIds.length - 1,
+      });
     }
     activeDisplay.textContent = `Added to table "${tableName}".`;
+    void recordChanges(entries);
   });
 
   return {

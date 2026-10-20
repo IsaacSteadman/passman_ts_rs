@@ -78,7 +78,7 @@ async fn main() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use actix_web::{App, test, web};
+    use actix_web::{App, http::header, test, web};
     use passman_crypto::HASH_SIZE;
     use sha2::{Digest, Sha512};
     use std::collections::HashMap;
@@ -240,9 +240,8 @@ mod tests {
         assert_eq!(mode & 0o777, 0o600);
     }
 
-    /// A password change must accept the `Last-Modified` from a GET as its
-    /// `If-Unmodified-Since`, and return a new `Last-Modified` that the next
-    /// save can use.
+    /// A password change must accept the `ETag` from a GET as its `If-Match`,
+    /// and return a new `ETag` that the next save can use.
     #[actix_web::test]
     async fn change_password_then_save() {
         let tmpdir = tempfile::tempdir().unwrap();
@@ -265,30 +264,82 @@ mod tests {
             .to_request();
         let resp: actix_web::dev::ServiceResponse = test::call_service(&app, req).await;
         assert_eq!(resp.status().as_u16(), 200);
-        let last_modified = resp.headers().get("Last-Modified").unwrap().clone();
+        let etag = resp.headers().get("ETag").unwrap().clone();
         // the body stream holds the user's read lock until it is consumed
         test::read_body(resp).await;
 
         let req = with_credentials(test::TestRequest::put(), &old_key)
             .uri("/pass-table-new-pass?username=frank")
             .insert_header((routes::base::NEW_AUTH_KEY_HEADER, new_key.as_str()))
-            .insert_header(("If-Unmodified-Since", last_modified))
+            .insert_header(("If-Match", etag))
             .insert_header(("Content-Length", "64"))
             .set_payload(vec![1u8; 64])
             .to_request();
         let resp: actix_web::dev::ServiceResponse = test::call_service(&app, req).await;
         assert_eq!(resp.status().as_u16(), 200);
-        let last_modified = resp.headers().get("Last-Modified").unwrap().clone();
+        let etag = resp.headers().get("ETag").unwrap().clone();
 
         let req = with_credentials(test::TestRequest::put(), &new_key)
             .uri(uri)
-            .insert_header(("If-Unmodified-Since", last_modified))
+            .insert_header(("If-Match", etag))
             .insert_header(("Content-Length", "64"))
             .set_payload(vec![2u8; 64])
             .to_request();
         let resp: actix_web::dev::ServiceResponse = test::call_service(&app, req).await;
         assert_eq!(resp.status().as_u16(), 200);
-        assert!(resp.headers().contains_key("Last-Modified"));
+        assert!(resp.headers().contains_key("ETag"));
+    }
+
+    /// A vault save for "gina" with the given `If-Match`.
+    fn put_vault(auth_key: &str, if_match: Option<&header::HeaderValue>) -> test::TestRequest {
+        let req = with_credentials(test::TestRequest::put(), auth_key)
+            .uri("/pass-table?username=gina")
+            .insert_header(("Content-Length", "64"))
+            .set_payload(vec![3u8; 64]);
+        match if_match {
+            Some(etag) => req.insert_header(("If-Match", etag.clone())),
+            None => req,
+        }
+    }
+
+    /// Saves within the same second must get distinct ETags, so a client
+    /// holding the older one is refused instead of overwriting the newer save.
+    /// (Saves within one filesystem timestamp tick are covered by
+    /// `finish_write_moves_mtime_past_previous`.)
+    #[actix_web::test]
+    async fn back_to_back_saves_get_distinct_etags() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let state = make_test_app(tmpdir.path()).await;
+        let app = init_app!(state);
+
+        let key = derive_client_auth_key("gina", "pw");
+        let req = with_credentials(test::TestRequest::post(), &key)
+            .uri("/pass-table?username=gina")
+            .insert_header(("Content-Length", "64"))
+            .set_payload(vec![0u8; 64])
+            .to_request();
+        let resp: actix_web::dev::ServiceResponse = test::call_service(&app, req).await;
+        assert_eq!(resp.status().as_u16(), 201);
+        let mut etag = resp.headers().get("ETag").unwrap().clone();
+
+        let mut seen = vec![etag.clone()];
+        for _ in 0..5 {
+            let resp = test::call_service(&app, put_vault(&key, Some(&etag)).to_request()).await;
+            assert_eq!(resp.status().as_u16(), 200);
+            etag = resp.headers().get("ETag").unwrap().clone();
+            assert!(!seen.contains(&etag), "ETag {etag:?} was reused");
+            seen.push(etag.clone());
+        }
+
+        // a session still holding an older version is refused
+        let resp = test::call_service(&app, put_vault(&key, Some(&seen[0])).to_request()).await;
+        assert_eq!(resp.status().as_u16(), 412);
+        // and a save without a version is refused too
+        let resp = test::call_service(&app, put_vault(&key, None).to_request()).await;
+        assert_eq!(resp.status().as_u16(), 428);
+        // the current version still works
+        let resp = test::call_service(&app, put_vault(&key, Some(&etag)).to_request()).await;
+        assert_eq!(resp.status().as_u16(), 200);
     }
 
     /// Registering the same username twice must return 409 Conflict.

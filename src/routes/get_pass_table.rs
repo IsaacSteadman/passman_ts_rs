@@ -1,5 +1,6 @@
 use crate::routes::base::{
-    AUTH_KEY_HEADER, AppState, GetUser, UserDataHeader, auth_key_header, http_date, policy_params,
+    AUTH_KEY_HEADER, AppState, GetUser, UserDataHeader, auth_key_header, policy_params,
+    vault_version,
 };
 use actix_web::{HttpRequest, HttpResponse, Responder, get, http::header, web};
 use serde::Deserialize;
@@ -64,7 +65,7 @@ pub async fn route(
         }
         Some(s) => s,
     };
-    let last_modified = http_date(match metadata.modified() {
+    let (last_modified, etag) = match vault_version(&metadata) {
         Ok(o) => o,
         Err(e) => {
             eprintln!(
@@ -75,7 +76,7 @@ pub async fn route(
                 "message": "Failed to read user file metadata last modified"
             }));
         }
-    });
+    };
     if let Err(e) = len_checker.check_len(remain_len) {
         return e;
     }
@@ -85,6 +86,7 @@ pub async fn route(
         .content_type("application/octet-stream")
         .insert_header(header::CacheControl(vec![header::CacheDirective::NoCache]))
         .insert_header(header::LastModified(last_modified))
+        .insert_header(header::ETag(etag))
         .streaming(async_stream::stream! {
             loop {
                 let r: Result<actix_web::web::Bytes, actix_web::Error> = match read_file.read(&mut buf).await {
