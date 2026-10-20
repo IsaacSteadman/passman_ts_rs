@@ -214,6 +214,9 @@ mod tests {
             "Login failed with status {}",
             resp.status()
         );
+        // the stored blob comes back exactly, with a matching Content-Length
+        assert_eq!(resp.headers().get("Content-Length").unwrap(), "64");
+        assert_eq!(test::read_body(resp).await, vec![0xffu8; 64]);
     }
 
     /// A vault holds ciphertext plus the password hash, so it must not be
@@ -266,6 +269,7 @@ mod tests {
         assert_eq!(resp.status().as_u16(), 200);
         let etag = resp.headers().get("ETag").unwrap().clone();
         // the body stream holds the user's read lock until it is consumed
+        // (or the download times out)
         test::read_body(resp).await;
 
         let req = with_credentials(test::TestRequest::put(), &old_key)
@@ -340,6 +344,54 @@ mod tests {
         // the current version still works
         let resp = test::call_service(&app, put_vault(&key, Some(&etag)).to_request()).await;
         assert_eq!(resp.status().as_u16(), 200);
+    }
+
+    /// A client that stops reading a download must block that user's saves
+    /// only until the download times out (5s for a small vault), and must
+    /// get an error rather than a silently truncated vault.
+    #[actix_web::test]
+    async fn stalled_download_times_out() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let state = make_test_app(tmpdir.path()).await;
+        let app = init_app!(state);
+
+        // larger than what the download hands over before blocking
+        let vault_len = 64 * 1024;
+        let key = derive_client_auth_key("hank", "pw");
+        let req = with_credentials(test::TestRequest::post(), &key)
+            .uri("/pass-table?username=hank")
+            .insert_header(("Content-Length", vault_len.to_string()))
+            .set_payload(vec![7u8; vault_len])
+            .to_request();
+        let resp: actix_web::dev::ServiceResponse = test::call_service(&app, req).await;
+        assert_eq!(resp.status().as_u16(), 201);
+
+        // start a download and never read it
+        let req = with_credentials(test::TestRequest::get(), &key)
+            .uri("/pass-table?username=hank")
+            .to_request();
+        let stalled: actix_web::dev::ServiceResponse = test::call_service(&app, req).await;
+        assert_eq!(stalled.status().as_u16(), 200);
+        let etag = stalled.headers().get("ETag").unwrap().clone();
+
+        let started = std::time::Instant::now();
+        let req = with_credentials(test::TestRequest::put(), &key)
+            .uri("/pass-table?username=hank")
+            .insert_header(("If-Match", etag))
+            .insert_header(("Content-Length", "64"))
+            .set_payload(vec![8u8; 64])
+            .to_request();
+        let resp: actix_web::dev::ServiceResponse = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            test::call_service(&app, req),
+        )
+        .await
+        .expect("save still blocked by the stalled download");
+        assert_eq!(resp.status().as_u16(), 200);
+        // it did wait for the download's timeout
+        assert!(started.elapsed() >= std::time::Duration::from_secs(4));
+
+        assert!(test::try_read_body(stalled).await.is_err());
     }
 
     /// Registering the same username twice must return 409 Conflict.

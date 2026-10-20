@@ -32,7 +32,8 @@ pub struct UserDataHeader {
 }
 
 impl UserDataHeader {
-    pub const SIZE: usize = std::mem::size_of::<UserDataHeader>();
+    /// Size on disk: the u32 version written by `to_writer`, then hash and salt.
+    pub const SIZE: usize = 4 + std::mem::size_of::<UserDataHeader>();
     pub async fn from_reader(f: &mut tokio::fs::File) -> anyhow::Result<Self> {
         let version = f.read_u32_le().await?;
         if version != 1 {
