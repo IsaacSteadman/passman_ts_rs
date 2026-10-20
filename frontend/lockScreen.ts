@@ -20,8 +20,9 @@ import {
 } from "./loginArea";
 
 export interface LockScreenHandle {
-  /** Re-reads the remembered accounts (e.g. after logging out). */
-  refresh(): Promise<void>;
+  /** Re-reads the remembered accounts (e.g. after logging out). The account
+   *  `selectId`, if given, is shown ready to unlock. */
+  refresh(selectId?: string | null): Promise<void>;
 }
 
 export function initLockScreen(
@@ -118,7 +119,7 @@ export function initLockScreen(
     }
   }
 
-  async function refresh(): Promise<void> {
+  async function refresh(selectId?: string | null): Promise<void> {
     let accounts: RememberedAccount[];
     try {
       accounts = await listAccounts();
@@ -162,7 +163,8 @@ export function initLockScreen(
       list.append(item);
     }
     rememberedDiv.style.display = accounts.length > 0 ? "" : "none";
-    select(null);
+    // no biometric prompt here: it has to follow a tap
+    select(accounts.find((account) => account.id === selectId) ?? null);
   }
 
   form.addEventListener("submit", async (event) => {

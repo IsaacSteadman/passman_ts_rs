@@ -52,13 +52,13 @@ document.addEventListener("DOMContentLoaded", async () => {
     ".pm-auth-wrap",
   ) as HTMLElement | null;
 
-  const contentHandle = initContentArea(contentDiv, () => {
-    // onLogout — restore the auth card and ensure the Login tab is active
+  const contentHandle = initContentArea(contentDiv, (lockedAccountId) => {
+    // onLock — restore the auth card and ensure the Login tab is active
     passgenHandle.clear();
     contentDiv.style.display = "none";
     loginDiv.style.display = "";
     if (authWrap) authWrap.style.display = "";
-    void lockScreen.refresh();
+    void lockScreen.refresh(lockedAccountId);
   });
 
   const passgenHandle = initPassgenPanel(

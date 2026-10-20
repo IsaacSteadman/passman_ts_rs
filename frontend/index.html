@@ -765,7 +765,7 @@
               </button>
             </div>
             <!-- Shown only for remembered accounts -->
-            <div name="biometric" class="pm-device-biometric">
+            <div name="biometric" class="pm-device-subsection">
               <p name="biometric-status" class="pm-device-status"></p>
               <div class="pm-device-actions">
                 <button
@@ -791,6 +791,29 @@
                 </button>
               </div>
               <p name="biometric-message" class="pm-chg-pass-status"></p>
+            </div>
+            <!-- Device-wide: stored in localStorage, not in the account -->
+            <div name="lock-settings" class="pm-device-subsection">
+              <p class="pm-device-status">
+                Auto-lock (for every account on this device)
+              </p>
+              <div class="pm-form-field">
+                <label for="idle-lock">Lock after no activity for</label>
+                <select name="idle-lock" id="idle-lock">
+                  <option value="1">1 minute</option>
+                  <option value="2">2 minutes</option>
+                  <option value="5">5 minutes</option>
+                  <option value="15">15 minutes</option>
+                  <option value="30">30 minutes</option>
+                  <option value="60">1 hour</option>
+                  <option value="never">Never</option>
+                </select>
+              </div>
+              <label class="pm-check-field">
+                <input type="checkbox" name="lock-when-hidden" />
+                Lock when the app is hidden (switching apps or turning off the
+                screen)
+              </label>
             </div>
           </div>
         </details>

@@ -5,6 +5,7 @@ import {
   putVault,
   requestPersistentStorage,
 } from "./deviceStore";
+import { initAutoLock, loadLockSettings, saveLockSettings } from "./autoLock";
 import { keyProtector, unlockErrorMessage } from "./keyProtector";
 import type { LoginResult, SyncedVault } from "./loginArea";
 import {
@@ -38,9 +39,14 @@ export interface ContentAreaHandle {
   recordChanges(entries: HistoryEntry[]): Promise<void>;
 }
 
+/**
+ * `onLock` runs after the session ended: by Logout/Lock (`lockedAccountId`
+ * null), or by auto-lock (the id of the remembered account that was locked,
+ * so it can be offered for unlocking again).
+ */
 export function initContentArea(
   contentDiv: HTMLDivElement,
-  onLogout: () => void,
+  onLock: (lockedAccountId: string | null) => void,
 ): ContentAreaHandle {
   const dataDiv = contentDiv.querySelector(
     "div[name='data']",
@@ -1154,6 +1160,8 @@ export function initContentArea(
       : "This account isn't stored on this device: it needs a connection to unlock, and nothing is kept after you log out.";
     rememberButton.style.display = remembered ? "none" : "";
     forgetButton.style.display = remembered ? "" : "none";
+    // a remembered account stays on the device: it's locked, not logged out
+    logoutButton.textContent = remembered ? "Lock" : "Logout";
     void renderBiometricSection();
   }
 
@@ -1224,14 +1232,14 @@ export function initContentArea(
       ? `${currentUsername} (${currentServerNs})`
       : currentUsername;
     biometricMessage.textContent = "Waiting for biometrics…";
+    const id = accountId(currentUsername, currentServerNs);
+    const secrets = {
+      authKeyB64: currentAuthKeyB64,
+      encryptionKey: currentEncryptionKey,
+    };
     try {
-      await keyProtector.protect(
-        accountId(currentUsername, currentServerNs),
-        label,
-        {
-          authKeyB64: currentAuthKeyB64,
-          encryptionKey: currentEncryptionKey,
-        },
+      await autoLock.suspendWhile(() =>
+        keyProtector.protect(id, label, secrets),
       );
       biometricMessage.textContent = "";
     } catch (e) {
@@ -1297,7 +1305,56 @@ export function initContentArea(
     }
   });
 
+  // ── Auto-lock settings (this device only) ───────────────────────────────
+  const idleLockSelect = deviceDetails.querySelector(
+    "select[name='idle-lock']",
+  ) as HTMLSelectElement;
+  const lockWhenHiddenCheckbox = deviceDetails.querySelector(
+    "input[name='lock-when-hidden']",
+  ) as HTMLInputElement;
+
+  function renderLockSettings(): void {
+    const { idleMinutes, lockWhenHidden } = loadLockSettings();
+    idleLockSelect.value = idleMinutes == null ? "never" : String(idleMinutes);
+    lockWhenHiddenCheckbox.checked = lockWhenHidden;
+  }
+
+  function onLockSettingsInput(): void {
+    saveLockSettings({
+      idleMinutes:
+        idleLockSelect.value === "never" ? null : Number(idleLockSelect.value),
+      lockWhenHidden: lockWhenHiddenCheckbox.checked,
+    });
+    autoLock.settingsChanged();
+  }
+  idleLockSelect.addEventListener("change", onLockSettingsInput);
+  lockWhenHiddenCheckbox.addEventListener("change", onLockSettingsInput);
+
+  const autoLock = initAutoLock(() => {
+    if (currentUsername == null) return true;
+    // locking discards what isn't stored anywhere yet
+    if (!remembered && hasUnsavedChanges()) {
+      statSpan.textContent =
+        "⚠ Not locked automatically: some changes aren't saved yet";
+      return false;
+    }
+    const lockedAccountId = remembered
+      ? accountId(currentUsername, currentServerNs)
+      : null;
+    endSession();
+    onLock(lockedAccountId);
+    return true;
+  });
+
   logoutButton.addEventListener("click", () => {
+    endSession();
+    onLock(null);
+  });
+
+  /** Forgets the keys and the decrypted vault. A remembered account's state
+   *  is already stored on the device (encrypted). */
+  function endSession(): void {
+    autoLock.stop();
     currentEncryptionKey = null;
     currentUsername = null;
     currentAuthKeyB64 = null;
@@ -1328,8 +1385,7 @@ export function initContentArea(
     deviceDetails.open = false;
     biometricMessage.textContent = "";
     contentDiv.style.display = "none";
-    onLogout();
-  });
+  }
 
   return {
     getCurrentData(): VaultRoot | null {
@@ -1372,6 +1428,8 @@ export function initContentArea(
       render();
       remembered = remember;
       renderDeviceSection();
+      renderLockSettings();
+      autoLock.start();
       if (remember) void rememberAccount();
       if (changed) void keysChanged();
       // the copy on this device may be out of date
