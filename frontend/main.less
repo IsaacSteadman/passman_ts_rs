@@ -1,19 +1,21 @@
 // Password Manager – shared component styles
 
+@import "theme.less";
+
 .pm-card {
-  border: 1px solid #d1d5db;
+  border: 1px solid var(--pm-border);
   border-radius: 8px;
   margin: 0.75em 0;
   overflow: hidden;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.07);
+  box-shadow: var(--pm-shadow-sm);
 }
 .pm-card-header {
   display: flex;
   align-items: center;
   gap: 0.4em;
   padding: 0.4em 0.75em;
-  background: #f9fafb;
-  border-bottom: 1px solid #d1d5db;
+  background: var(--pm-surface-muted);
+  border-bottom: 1px solid var(--pm-border);
 }
 .pm-card-name {
   flex: 1;
@@ -27,10 +29,10 @@
   cursor: text;
   min-width: 4em;
   &:hover {
-    border-bottom-color: #9ca3af;
+    border-bottom-color: var(--pm-text-faint);
   }
   &:focus {
-    border-bottom-color: #3b82f6;
+    border-bottom-color: var(--pm-accent-fg);
   }
 }
 table.pm-table {
@@ -38,8 +40,8 @@ table.pm-table {
   border-collapse: collapse;
   font-size: 0.9em;
   th {
-    background: #f3f4f6;
-    border-bottom: 2px solid #d1d5db;
+    background: var(--pm-surface-subtle);
+    border-bottom: 2px solid var(--pm-border);
     padding: 0.3em 0.6em;
     text-align: left;
     font-weight: 600;
@@ -47,10 +49,10 @@ table.pm-table {
     font-size: 0.82em;
     text-transform: uppercase;
     letter-spacing: 0.04em;
-    color: #6b7280;
+    color: var(--pm-text-muted);
   }
   td {
-    border-bottom: 1px solid #e5e7eb;
+    border-bottom: 1px solid var(--pm-border-muted);
     padding: 0.3em 0.6em;
     vertical-align: middle;
   }
@@ -69,10 +71,10 @@ table.pm-table {
     border-bottom: none;
   }
   tbody tr:hover:not(.pm-editing) {
-    background: #f9fafb;
+    background: var(--pm-surface-muted);
   }
   tr.pm-editing td {
-    background: #eff6ff;
+    background: var(--pm-accent-soft);
   }
   tr.pm-editing input,
   tr.pm-editing textarea,
@@ -80,14 +82,14 @@ table.pm-table {
     width: 100%;
     box-sizing: border-box;
     padding: 0.2em 0.35em;
-    border: 1px solid #d1d5db;
+    border: 1px solid var(--pm-border);
     border-radius: 4px;
     font-family: inherit;
     font-size: inherit;
-    background: #fff;
+    background: var(--pm-surface);
     &:focus {
       outline: none;
-      border-color: #3b82f6;
+      border-color: var(--pm-accent-fg);
     }
   }
   tr.pm-editing textarea {
@@ -101,12 +103,12 @@ table.pm-table {
   }
   // ── Per-cell inline editing (new cell-level edit model) ──────────────────
   td.pm-cell-selected {
-    outline: 2px solid #93c5fd;
+    outline: 2px solid var(--pm-selected);
     outline-offset: -2px;
     cursor: text;
   }
   td.pm-cell-editing {
-    background: #eff6ff;
+    background: var(--pm-accent-soft);
     overflow: visible;
     white-space: normal;
     max-width: none;
@@ -117,14 +119,14 @@ table.pm-table {
       width: 100%;
       box-sizing: border-box;
       padding: 0.2em 0.35em;
-      border: 1px solid #d1d5db;
+      border: 1px solid var(--pm-border);
       border-radius: 4px;
       font-family: inherit;
       font-size: inherit;
-      background: #fff;
+      background: var(--pm-surface);
       &:focus {
         outline: none;
-        border-color: #3b82f6;
+        border-color: var(--pm-accent-fg);
       }
     }
     textarea {
@@ -144,7 +146,7 @@ table.pm-table {
   border-radius: 5px;
   cursor: pointer;
   background: transparent;
-  color: #6b7280;
+  color: var(--pm-text-muted);
   vertical-align: middle;
   flex-shrink: 0;
   svg {
@@ -153,25 +155,25 @@ table.pm-table {
     display: block;
   }
   &:hover {
-    background: #f3f4f6;
-    color: #374151;
+    background: var(--pm-hover);
+    color: var(--pm-text-label);
   }
   &.pm-danger {
     &:hover {
-      background: #fee2e2;
-      color: #dc2626;
+      background: var(--pm-danger-soft);
+      color: var(--pm-danger);
     }
   }
   &.pm-success {
-    color: #16a34a;
+    color: var(--pm-success);
     &:hover {
-      background: #dcfce7;
+      background: var(--pm-success-soft);
     }
   }
   &.pm-primary {
-    color: #3b82f6;
+    color: var(--pm-accent-fg);
     &:hover {
-      background: #eff6ff;
+      background: var(--pm-accent-soft);
     }
   }
 }
@@ -180,10 +182,10 @@ table.pm-table {
   align-items: center;
   gap: 3px;
   padding: 0.2em 0.55em;
-  border: 1px dashed #d1d5db;
+  border: 1px dashed var(--pm-border);
   border-radius: 5px;
   background: transparent;
-  color: #6b7280;
+  color: var(--pm-text-muted);
   font-size: 0.82em;
   cursor: pointer;
   white-space: nowrap;
@@ -192,27 +194,27 @@ table.pm-table {
     height: 13px;
   }
   &:hover {
-    border-color: #3b82f6;
-    color: #3b82f6;
-    background: #eff6ff;
+    border-color: var(--pm-accent-fg);
+    color: var(--pm-accent-fg);
+    background: var(--pm-accent-soft);
   }
 }
 .pm-backdrop {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.35);
+  background: var(--pm-backdrop);
   z-index: 999;
   display: flex;
   align-items: center;
   justify-content: center;
 }
 .pm-modal {
-  background: #fff;
+  background: var(--pm-surface);
   border-radius: 10px;
   padding: 1.25em 1.5em;
   min-width: 300px;
   max-width: 90vw;
-  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.25);
+  box-shadow: var(--pm-shadow-lg);
   h3 {
     margin: 0 0 1em;
     font-size: 1.05em;
@@ -223,7 +225,7 @@ table.pm-table {
   label {
     display: block;
     font-size: 0.85em;
-    color: #4b5563;
+    color: var(--pm-text-secondary);
     margin-bottom: 0.25em;
   }
   input,
@@ -231,15 +233,15 @@ table.pm-table {
     display: block;
     width: 100%;
     padding: 0.35em 0.5em;
-    border: 1px solid #d1d5db;
+    border: 1px solid var(--pm-border);
     border-radius: 5px;
     font-size: 0.95em;
     box-sizing: border-box;
     font-family: inherit;
     &:focus {
       outline: none;
-      border-color: #3b82f6;
-      box-shadow: 0 0 0 3px #dbeafe;
+      border-color: var(--pm-accent-fg);
+      box-shadow: 0 0 0 3px var(--pm-focus-ring);
     }
   }
 }
@@ -257,18 +259,18 @@ table.pm-table {
   font-size: 0.9em;
   font-family: inherit;
   &.pm-btn-primary {
-    background: #3b82f6;
-    color: #fff;
+    background: var(--pm-accent);
+    color: var(--pm-on-accent);
     &:hover {
-      background: #2563eb;
+      background: var(--pm-accent-hover);
     }
   }
   &.pm-btn-ghost {
     background: transparent;
-    color: #6b7280;
-    border: 1px solid #d1d5db;
+    color: var(--pm-text-muted);
+    border: 1px solid var(--pm-border);
     &:hover {
-      background: #f3f4f6;
+      background: var(--pm-hover);
     }
   }
 }
@@ -279,10 +281,10 @@ table.pm-table {
 #passgen-panel {
   max-width: 560px;
   width: 100%;
-  background: #fff;
-  border: 1px solid #d1d5db;
+  background: var(--pm-surface);
+  border: 1px solid var(--pm-border);
   border-radius: 10px;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.07);
+  box-shadow: var(--pm-shadow-sm);
   overflow: hidden;
   margin: 0.75em 0;
 
@@ -296,19 +298,19 @@ table.pm-table {
 
   // Section groups
   .pg-section {
-    border: 1px solid #e5e7eb;
+    border: 1px solid var(--pm-border-muted);
     border-radius: 6px;
     overflow: hidden;
   }
   .pg-section-title {
     padding: 0.3em 0.75em;
-    background: #f3f4f6;
-    border-bottom: 1px solid #e5e7eb;
+    background: var(--pm-surface-subtle);
+    border-bottom: 1px solid var(--pm-border-muted);
     font-size: 0.78em;
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.05em;
-    color: #6b7280;
+    color: var(--pm-text-muted);
   }
   .pg-section-body {
     padding: 0.65rem 0.75rem;
@@ -338,15 +340,15 @@ table.pm-table {
       font-size: 0.9em;
     }
     &.pg-mode-row--active {
-      background: #eff6ff;
-      border-color: #bfdbfe;
+      background: var(--pm-accent-soft);
+      border-color: var(--pm-accent-soft-border);
       label {
-        color: #1d4ed8;
+        color: var(--pm-accent-strong);
         font-weight: 500;
       }
       .pg-num-input {
-        border-color: #3b82f6;
-        box-shadow: 0 0 0 2px #dbeafe;
+        border-color: var(--pm-accent-fg);
+        box-shadow: 0 0 0 2px var(--pm-focus-ring);
       }
     }
     &.pg-mode-row--inactive {
@@ -358,18 +360,20 @@ table.pm-table {
     flex-shrink: 0;
   }
   .pg-num-input {
+    color: var(--pm-text);
+    background: var(--pm-surface);
     width: 6rem;
     min-width: 4rem;
     padding: 0.28em 0.4em;
-    border: 1px solid #d1d5db;
+    border: 1px solid var(--pm-border);
     border-radius: 5px;
     font-size: 0.9em;
     font-family: inherit;
     text-align: right;
     &:focus {
       outline: none;
-      border-color: #3b82f6;
-      box-shadow: 0 0 0 2px #dbeafe;
+      border-color: var(--pm-accent-fg);
+      box-shadow: 0 0 0 2px var(--pm-focus-ring);
     }
     &:disabled {
       background: transparent;
@@ -380,11 +384,11 @@ table.pm-table {
   .pg-hint {
     padding-left: 1.5rem;
     font-size: 0.78em;
-    color: #6b7280;
+    color: var(--pm-text-muted);
     font-style: italic;
     min-height: 1em;
     &.pg-hint--warn {
-      color: #dc2626;
+      color: var(--pm-danger);
       font-style: normal;
       font-weight: 500;
     }
@@ -399,52 +403,54 @@ table.pm-table {
   }
   .pg-field-label {
     font-size: 0.87em;
-    color: #4b5563;
+    color: var(--pm-text-secondary);
     font-weight: 500;
     flex: 0 0 4.5em;
   }
   .pg-symbol-input {
+    color: var(--pm-text);
+    background: var(--pm-surface);
     flex: 1;
     min-width: 0;
     padding: 0.28em 0.4em;
-    border: 1px solid #d1d5db;
+    border: 1px solid var(--pm-border);
     border-radius: 5px;
     font-family: "Courier New", monospace;
     font-size: 0.87em;
     &:focus {
       outline: none;
-      border-color: #3b82f6;
-      box-shadow: 0 0 0 2px #dbeafe;
+      border-color: var(--pm-accent-fg);
+      box-shadow: 0 0 0 2px var(--pm-focus-ring);
     }
   }
   .pg-reset-btn {
     flex-shrink: 0;
     padding: 0.25em 0.65em;
     border-radius: 5px;
-    border: 1px solid #d1d5db;
+    border: 1px solid var(--pm-border);
     background: transparent;
-    color: #6b7280;
+    color: var(--pm-text-muted);
     cursor: pointer;
     font-size: 0.82em;
     font-family: inherit;
     &:hover {
-      background: #f3f4f6;
-      color: #374151;
+      background: var(--pm-hover);
+      color: var(--pm-text-label);
     }
   }
   .pg-select {
     flex: 1;
     min-width: 0;
     padding: 0.28em 0.4em;
-    border: 1px solid #d1d5db;
+    border: 1px solid var(--pm-border);
     border-radius: 5px;
     font-size: 0.87em;
     font-family: inherit;
-    background: #fff;
+    background: var(--pm-surface);
     &:focus {
       outline: none;
-      border-color: #3b82f6;
-      box-shadow: 0 0 0 2px #dbeafe;
+      border-color: var(--pm-accent-fg);
+      box-shadow: 0 0 0 2px var(--pm-focus-ring);
     }
   }
 
@@ -472,8 +478,8 @@ table.pm-table {
   .pg-generate-btn {
     width: 100%;
     padding: 0.6em 1em;
-    background: #3b82f6;
-    color: #fff;
+    background: var(--pm-accent);
+    color: var(--pm-on-accent);
     border: none;
     border-radius: 7px;
     font-size: 1rem;
@@ -481,18 +487,18 @@ table.pm-table {
     font-family: inherit;
     cursor: pointer;
     &:hover {
-      background: #2563eb;
+      background: var(--pm-accent-hover);
     }
     &:active {
-      background: #1d4ed8;
+      background: var(--pm-accent-active);
     }
   }
 
   // Result area
   .pg-result {
-    border: 1px solid #d1d5db;
+    border: 1px solid var(--pm-border);
     border-radius: 7px;
-    background: #f9fafb;
+    background: var(--pm-surface-muted);
     overflow: hidden;
   }
   .pg-result-row {
@@ -501,7 +507,7 @@ table.pm-table {
     gap: 0.4rem;
     padding: 0.5rem 0.6rem;
     & + .pg-result-row {
-      border-top: 1px solid #e5e7eb;
+      border-top: 1px solid var(--pm-border-muted);
     }
   }
   .pg-password-output {
@@ -511,10 +517,10 @@ table.pm-table {
     border: none;
     font-family: "Courier New", monospace;
     font-size: 0.95em;
-    color: #111827;
+    color: var(--pm-text);
     outline: none;
     &::placeholder {
-      color: #9ca3af;
+      color: var(--pm-text-faint);
       font-style: italic;
       font-family: inherit;
     }
@@ -524,7 +530,7 @@ table.pm-table {
     flex-wrap: wrap;
   }
   .pg-add-label {
-    color: #6b7280;
+    color: var(--pm-text-muted);
     flex: 0 0 auto;
     white-space: nowrap;
   }
@@ -535,14 +541,14 @@ table.pm-table {
     flex-shrink: 0;
     padding: 0.25em 0.65em;
     border-radius: 5px;
-    border: 1px solid #d1d5db;
+    border: 1px solid var(--pm-border);
     background: transparent;
-    color: #374151;
+    color: var(--pm-text-label);
     cursor: pointer;
     font-size: inherit;
     font-family: inherit;
     &:hover {
-      background: #f3f4f6;
+      background: var(--pm-hover);
     }
   }
 
@@ -595,9 +601,15 @@ body {
     sans-serif;
   font-size: 15px;
   line-height: 1.5;
-  color: #111827;
-  background: #f3f4f6;
+  color: var(--pm-text);
+  background: var(--pm-bg);
   min-height: 100vh;
+}
+a {
+  color: var(--pm-link);
+  &:visited {
+    color: var(--pm-link-visited);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -612,13 +624,13 @@ body {
 }
 
 .pm-auth-card {
-  background: #ffffff;
+  background: var(--pm-surface);
   border-radius: 14px;
-  box-shadow: 0 4px 32px rgba(0, 0, 0, 0.1);
+  box-shadow: var(--pm-shadow-card);
   width: 100%;
   max-width: 440px;
   overflow: hidden;
-  border-top: 4px solid #3b82f6;
+  border-top: 4px solid var(--pm-accent);
   padding: 2rem 2rem 1.75rem;
 }
 
@@ -631,21 +643,21 @@ body {
   svg {
     width: 28px;
     height: 28px;
-    color: #3b82f6;
+    color: var(--pm-accent-fg);
     flex-shrink: 0;
   }
   h1 {
     margin: 0;
     font-size: 1.25rem;
     font-weight: 700;
-    color: #111827;
+    color: var(--pm-text);
     letter-spacing: -0.01em;
   }
 }
 
 // Error / status message panel
 #error-panel {
-  color: #dc2626;
+  color: var(--pm-danger);
   font-size: 0.875em;
   min-height: 1.4em;
   margin: -0.5rem 0 0.85rem;
@@ -656,9 +668,9 @@ body {
 // password (saving paused)
 .pm-conflict,
 .pm-password-changed {
-  color: #991b1b;
-  background: #fef2f2;
-  border: 1px solid #fca5a5;
+  color: var(--pm-alert-text);
+  background: var(--pm-alert-bg);
+  border: 1px solid var(--pm-alert-border);
   border-radius: 5px;
   padding: 0.75em 1em;
   margin-bottom: 1em;
@@ -677,7 +689,7 @@ body {
 .pm-auth-tabs {
   display: flex;
   gap: 0;
-  border-bottom: 2px solid #e5e7eb;
+  border-bottom: 2px solid var(--pm-border-muted);
   margin-bottom: 1.5rem;
 }
 .pm-auth-tab {
@@ -685,7 +697,7 @@ body {
   padding: 0.45rem 1rem;
   font-size: 0.9em;
   font-weight: 500;
-  color: #6b7280;
+  color: var(--pm-text-muted);
   text-decoration: none;
   border-bottom: 2px solid transparent;
   margin-bottom: -2px;
@@ -693,11 +705,11 @@ body {
   transition: color 0.12s;
   user-select: none;
   &:hover {
-    color: #374151;
+    color: var(--pm-text-label);
   }
   &.pm-auth-tab--active {
-    color: #1d4ed8;
-    border-bottom-color: #3b82f6;
+    color: var(--pm-accent-strong);
+    border-bottom-color: var(--pm-accent-fg);
     cursor: default;
     font-weight: 600;
   }
@@ -710,27 +722,29 @@ body {
     display: block;
     font-size: 0.875em;
     font-weight: 500;
-    color: #374151;
+    color: var(--pm-text-label);
     margin-bottom: 0.3rem;
   }
+  // the build drops type="text" (the default), so also match inputs without one
+  input:not([type]),
   input[type="text"],
   input[type="password"] {
     display: block;
     width: 100%;
     padding: 0.5em 0.65em;
-    border: 1px solid #d1d5db;
+    border: 1px solid var(--pm-border);
     border-radius: 6px;
     font-size: 0.95em;
     font-family: inherit;
-    color: #111827;
-    background: #fff;
+    color: var(--pm-text);
+    background: var(--pm-surface);
     transition:
       border-color 0.12s,
       box-shadow 0.12s;
     &:focus {
       outline: none;
-      border-color: #3b82f6;
-      box-shadow: 0 0 0 3px #dbeafe;
+      border-color: var(--pm-accent-fg);
+      box-shadow: 0 0 0 3px var(--pm-focus-ring);
     }
   }
 }
@@ -739,13 +753,14 @@ body {
 .pm-field-hint {
   margin: 0.3rem 0 0;
   font-size: 0.8em;
-  color: #6b7280;
+  color: var(--pm-text-muted);
   line-height: 1.4;
 }
 
 // Password input wrapper: positions eye-toggle inside the input
 .pm-pass-field {
   position: relative;
+  input:not([type]),
   input[type="password"],
   input[type="text"] {
     padding-right: 2.4rem; // leave room for the eye icon
@@ -761,12 +776,12 @@ body {
   display: flex;
   align-items: center;
   cursor: pointer;
-  color: #9ca3af;
+  color: var(--pm-text-faint);
   padding: 0.15rem;
   border-radius: 4px;
   transition: color 0.12s;
   &:hover {
-    color: #6b7280;
+    color: var(--pm-text-muted);
   }
   // Checkbox is kept in the DOM (TS .change event still fires) but invisible
   input[type="checkbox"] {
@@ -788,7 +803,7 @@ body {
   }
   // When checkbox is checked → password is visible → show the "slash" icon
   &:has(input:checked) {
-    color: #3b82f6;
+    color: var(--pm-accent-fg);
     .pm-eye-open {
       display: none;
     }
@@ -802,8 +817,8 @@ body {
 .pm-auth-submit {
   display: inline-block;
   padding: 0.6em 1.25em;
-  background: #3b82f6;
-  color: #ffffff;
+  background: var(--pm-accent);
+  color: var(--pm-on-accent);
   border: none;
   border-radius: 7px;
   font-size: 0.95em;
@@ -812,10 +827,10 @@ body {
   cursor: pointer;
   transition: background 0.12s;
   &:hover {
-    background: #2563eb;
+    background: var(--pm-accent-hover);
   }
   &:active {
-    background: #1d4ed8;
+    background: var(--pm-accent-active);
   }
   // Inside auth card → stretch to full width
   .pm-auth-card & {
@@ -829,7 +844,7 @@ body {
 
 // Server settings collapsible
 .pm-server-settings {
-  border-top: 1px solid #e5e7eb;
+  border-top: 1px solid var(--pm-border-muted);
   margin-top: 1.5rem;
   summary {
     display: flex;
@@ -839,7 +854,7 @@ body {
     cursor: pointer;
     font-size: 0.82em;
     font-weight: 500;
-    color: #6b7280;
+    color: var(--pm-text-muted);
     user-select: none;
     list-style: none;
     &::-webkit-details-marker {
@@ -868,7 +883,7 @@ body {
   display: flex;
   flex-direction: column;
   min-height: 100vh;
-  background: #f3f4f6;
+  background: var(--pm-bg);
 }
 
 // Sticky top bar (brand + status + action buttons)
@@ -880,9 +895,9 @@ body {
   align-items: center;
   gap: 0.75rem;
   padding: 0.6rem 1.25rem;
-  background: #ffffff;
-  border-bottom: 1px solid #e5e7eb;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
+  background: var(--pm-surface);
+  border-bottom: 1px solid var(--pm-border-muted);
+  box-shadow: var(--pm-shadow-sm);
 }
 .pm-app-bar-brand {
   display: flex;
@@ -890,19 +905,19 @@ body {
   gap: 0.4rem;
   font-weight: 700;
   font-size: 0.95rem;
-  color: #111827;
+  color: var(--pm-text);
   flex: 1;
   white-space: nowrap;
   svg {
     width: 20px;
     height: 20px;
-    color: #3b82f6;
+    color: var(--pm-accent-fg);
     flex-shrink: 0;
   }
 }
 .pm-app-bar-status {
   font-size: 0.8em;
-  color: #6b7280;
+  color: var(--pm-text-muted);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -930,17 +945,17 @@ body {
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.06em;
-  color: #6b7280;
+  color: var(--pm-text-muted);
   padding-bottom: 0.4rem;
-  border-bottom: 1px solid #e5e7eb;
+  border-bottom: 1px solid var(--pm-border-muted);
 }
 
 // Change Password  —  styled collapsible card
 .pm-chg-pass-details {
   margin-top: 1.75rem;
-  border: 1px solid #e5e7eb;
+  border: 1px solid var(--pm-border-muted);
   border-radius: 10px;
-  background: #ffffff;
+  background: var(--pm-surface);
   overflow: hidden;
   summary {
     display: flex;
@@ -950,7 +965,7 @@ body {
     cursor: pointer;
     font-size: 0.9em;
     font-weight: 600;
-    color: #374151;
+    color: var(--pm-text-label);
     user-select: none;
     list-style: none;
     &::-webkit-details-marker {
@@ -959,19 +974,19 @@ body {
     svg {
       width: 16px;
       height: 16px;
-      color: #6b7280;
+      color: var(--pm-text-muted);
       flex-shrink: 0;
     }
     &::after {
       content: "▾";
       margin-left: auto;
       font-size: 0.9em;
-      color: #9ca3af;
+      color: var(--pm-text-faint);
       transition: transform 0.15s;
       display: inline-block;
     }
     &:hover {
-      background: #f9fafb;
+      background: var(--pm-surface-muted);
     }
   }
   &[open] summary::after {
@@ -980,7 +995,7 @@ body {
 }
 .pm-chg-pass-body {
   padding: 1.25rem;
-  border-top: 1px solid #e5e7eb;
+  border-top: 1px solid var(--pm-border-muted);
 }
 // Submit + status side by side
 .pm-chg-pass-footer {
@@ -992,7 +1007,7 @@ body {
 }
 .pm-chg-pass-status {
   font-size: 0.875em;
-  color: #6b7280;
+  color: var(--pm-text-muted);
 }
 
 // ---------------------------------------------------------------------------
@@ -1057,7 +1072,7 @@ body {
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.06em;
-  color: #6b7280;
+  color: var(--pm-text-muted);
 }
 .pm-account-list {
   list-style: none;
@@ -1073,25 +1088,25 @@ body {
   gap: 0.5rem;
   width: 100%;
   padding: 0.7em 0.9em;
-  border: 1px solid #d1d5db;
+  border: 1px solid var(--pm-border);
   border-radius: 7px;
-  background: #ffffff;
+  background: var(--pm-surface);
   font-family: inherit;
   font-size: 0.95em;
   text-align: left;
   cursor: pointer;
   &:hover {
-    border-color: #3b82f6;
-    background: #eff6ff;
+    border-color: var(--pm-accent-fg);
+    background: var(--pm-accent-soft);
   }
 }
 .pm-account-name {
   font-weight: 600;
-  color: #111827;
+  color: var(--pm-text);
 }
 .pm-account-ns {
   font-size: 0.85em;
-  color: #6b7280;
+  color: var(--pm-text-muted);
 }
 .pm-unlock {
   display: none;
@@ -1125,7 +1140,7 @@ body {
   gap: 0.45rem;
   margin: -0.25rem 0 1rem;
   font-size: 0.875em;
-  color: #374151;
+  color: var(--pm-text-label);
   cursor: pointer;
 }
 
@@ -1148,9 +1163,11 @@ body {
     flex: 1;
     min-width: 12em;
     padding: 0.4em 0.6em;
-    border: 1px solid #d1d5db;
+    border: 1px solid var(--pm-border);
     border-radius: 5px;
     font-family: inherit;
+    color: var(--pm-text);
+    background: var(--pm-surface);
   }
 }
 
@@ -1158,7 +1175,7 @@ body {
 .pm-device-status {
   margin: 0 0 1rem;
   font-size: 0.9em;
-  color: #374151;
+  color: var(--pm-text-label);
 }
 .pm-device-actions {
   display: flex;
@@ -1171,18 +1188,44 @@ body {
   margin: 0.75rem 0 0.5rem;
   text-align: center;
   font-size: 0.85em;
-  color: #6b7280;
+  color: var(--pm-text-muted);
 }
 .pm-device-subsection {
   margin-top: 1.25rem;
   padding-top: 1rem;
-  border-top: 1px solid #e5e7eb;
+  border-top: 1px solid var(--pm-border-muted);
   select {
     padding: 0.4em 0.6em;
-    border: 1px solid #d1d5db;
+    border: 1px solid var(--pm-border);
     border-radius: 6px;
     font-family: inherit;
     font-size: 0.95em;
-    background: #fff;
+    background: var(--pm-surface);
   }
+}
+
+// Messages and placeholders inside the vault tables and dialogs
+.pm-field-error {
+  display: block;
+  min-height: 1.2em;
+  font-size: 0.8em;
+  color: var(--pm-danger);
+}
+.pm-modal-error {
+  margin: 0;
+  font-size: 0.85em;
+  color: var(--pm-danger);
+}
+.pm-placeholder {
+  color: var(--pm-text-faint);
+  font-style: italic;
+}
+.pm-empty-note {
+  margin: 0.5em 0;
+  color: var(--pm-text-muted);
+  font-style: italic;
+}
+// Briefly shown after copying
+.pm-icon-btn.pm-copied {
+  color: var(--pm-success);
 }

@@ -1,0 +1,111 @@
+// Colour tokens. Every colour in the app comes from here, so each theme is
+// defined in one place.
+//
+// The theme follows the device unless one was picked under This Device
+// (theme.ts), which sets data-theme="light" or "dark" on <html>.
+
+:root {
+  color-scheme: light;
+
+  // Surfaces
+  --pm-bg: #f3f4f6; // page background
+  --pm-surface: #ffffff; // cards, panels, inputs
+  --pm-surface-muted: #f9fafb; // card headers, hovered rows
+  --pm-surface-subtle: #f3f4f6; // table headings, section titles
+  --pm-hover: #f3f4f6; // hovered buttons
+
+  // Lines
+  --pm-border: #d1d5db;
+  --pm-border-muted: #e5e7eb;
+
+  // Text
+  --pm-text: #111827;
+  --pm-text-label: #374151;
+  --pm-text-secondary: #4b5563;
+  --pm-text-muted: #6b7280;
+  --pm-text-faint: #9ca3af;
+  --pm-link: #1d4ed8;
+  --pm-link-visited: #6d28d9;
+
+  // Accent: filled buttons use --pm-accent with --pm-on-accent text; text,
+  // icons and focused borders use --pm-accent-fg
+  --pm-accent: #3b82f6;
+  --pm-accent-hover: #2563eb;
+  --pm-accent-active: #1d4ed8;
+  --pm-on-accent: #ffffff;
+  --pm-accent-fg: #3b82f6;
+  --pm-accent-strong: #1d4ed8;
+  --pm-accent-soft: #eff6ff; // selected / editing background
+  --pm-accent-soft-border: #bfdbfe;
+  --pm-focus-ring: #dbeafe;
+  --pm-selected: #93c5fd; // selected table cell outline
+
+  // Status
+  --pm-danger: #dc2626;
+  --pm-danger-soft: #fee2e2;
+  --pm-success: #16a34a;
+  --pm-success-soft: #dcfce7;
+  --pm-alert-text: #991b1b; // banners: conflicts, password changed
+  --pm-alert-bg: #fef2f2;
+  --pm-alert-border: #fca5a5;
+
+  // Elevation
+  --pm-shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.07);
+  --pm-shadow-card: 0 4px 32px rgba(0, 0, 0, 0.1);
+  --pm-shadow-lg: 0 10px 40px rgba(0, 0, 0, 0.25);
+  --pm-backdrop: rgba(0, 0, 0, 0.35);
+}
+
+.pm-dark-tokens() {
+  color-scheme: dark;
+
+  --pm-bg: #111827;
+  --pm-surface: #1f2937;
+  --pm-surface-muted: #263243;
+  --pm-surface-subtle: #2b3646;
+  --pm-hover: #374151;
+
+  --pm-border: #4b5563;
+  --pm-border-muted: #374151;
+
+  --pm-text: #f3f4f6;
+  --pm-text-label: #d1d5db;
+  --pm-text-secondary: #c5cbd3;
+  --pm-text-muted: #9ca3af;
+  --pm-text-faint: #6b7280;
+  --pm-link: #93c5fd;
+  --pm-link-visited: #c4b5fd;
+
+  --pm-accent: #2563eb;
+  --pm-accent-hover: #1d4ed8;
+  --pm-accent-active: #1e40af;
+  --pm-on-accent: #ffffff;
+  --pm-accent-fg: #60a5fa;
+  --pm-accent-strong: #93c5fd;
+  --pm-accent-soft: #1e3a5f;
+  --pm-accent-soft-border: #1e40af;
+  --pm-focus-ring: rgba(96, 165, 250, 0.35);
+  --pm-selected: #3b82f6;
+
+  --pm-danger: #f87171;
+  --pm-danger-soft: #3f1d22;
+  --pm-success: #4ade80;
+  --pm-success-soft: #163a26;
+  --pm-alert-text: #fecaca;
+  --pm-alert-bg: #3a1519;
+  --pm-alert-border: #7f1d1d;
+
+  --pm-shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.4);
+  --pm-shadow-card: 0 4px 32px rgba(0, 0, 0, 0.5);
+  --pm-shadow-lg: 0 10px 40px rgba(0, 0, 0, 0.6);
+  --pm-backdrop: rgba(0, 0, 0, 0.6);
+}
+
+:root[data-theme="dark"] {
+  .pm-dark-tokens();
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    .pm-dark-tokens();
+  }
+}

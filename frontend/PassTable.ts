@@ -269,8 +269,7 @@ function renderLinkEdit(td: HTMLTableCellElement, data: LinkCellData) {
   urlInput.placeholder = "https://\u2026";
 
   const urlError = document.createElement("span");
-  urlError.style.cssText =
-    "color:#dc2626;font-size:.8em;display:block;min-height:1.2em";
+  urlError.className = "pm-field-error";
   urlError.textContent = validateUrl(data.url) ?? "";
   urlInput.addEventListener("input", () => {
     urlError.textContent = validateUrl(urlInput.value) ?? "";
@@ -301,8 +300,7 @@ function renderPasswordEdit(td: HTMLTableCellElement, data: PasswordCellData) {
   input.value = data.value;
 
   const errorSpan = document.createElement("span");
-  errorSpan.style.cssText =
-    "color:#dc2626;font-size:.8em;display:block;min-height:1.2em";
+  errorSpan.className = "pm-field-error";
 
   function updateValidation() {
     if (select.value === "mfa-key") {
@@ -369,13 +367,11 @@ function newCell(col: PassTableColumn) {
 
 // ── Cell read-mode rendering ──────────────────────────────────────────────────
 
-const PLACEHOLDER_STYLE = "color:#9ca3af;font-style:italic";
-
 function renderTextArea(td: HTMLTableCellElement, data: string) {
   if (!data) {
     const s = document.createElement("span");
     s.textContent = "—";
-    s.style.cssText = PLACEHOLDER_STYLE;
+    s.className = "pm-placeholder";
     td.appendChild(s);
   } else {
     td.innerText = data;
@@ -386,7 +382,7 @@ function renderLink(td: HTMLTableCellElement, data: LinkCellData) {
   if (!data.url) {
     const s = document.createElement("span");
     s.textContent = "—";
-    s.style.cssText = PLACEHOLDER_STYLE;
+    s.className = "pm-placeholder";
     td.appendChild(s);
     return;
   }
@@ -411,7 +407,7 @@ function renderPassword(td: HTMLTableCellElement, data: PasswordCellData) {
   if (!data.value) {
     const s = document.createElement("span");
     s.textContent = "—";
-    s.style.cssText = PLACEHOLDER_STYLE;
+    s.className = "pm-placeholder";
     td.appendChild(s);
     return;
   }
@@ -427,9 +423,9 @@ function renderPassword(td: HTMLTableCellElement, data: PasswordCellData) {
     const val =
       data.type === "mfa-key" ? await generateOtp(data.value) : data.value;
     copyTextToClipboard(val);
-    copyBtn.style.color = "#16a34a";
+    copyBtn.classList.add("pm-copied");
     setTimeout(() => {
-      copyBtn.style.color = "";
+      copyBtn.classList.remove("pm-copied");
     }, 700);
   });
   td.append(span, " ", copyBtn);
@@ -797,7 +793,7 @@ export function renderPassTable(
     typeField.append(typeLabel, typeSelect);
 
     const errorEl = document.createElement("p");
-    errorEl.style.cssText = "color:#dc2626;font-size:.85em;margin:0";
+    errorEl.className = "pm-modal-error";
 
     const footer = document.createElement("div");
     footer.className = "pm-modal-footer";

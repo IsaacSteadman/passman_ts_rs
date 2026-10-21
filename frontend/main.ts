@@ -9,6 +9,9 @@ import {
 import { initContentArea } from "./contentArea";
 import { initLockScreen } from "./lockScreen";
 import { initPassgenPanel } from "./passgenPanel";
+import { initTheme } from "./theme";
+
+initTheme();
 
 if ("serviceWorker" in navigator) {
   // keeps a copy of the app so it starts offline (see sw.ts)

@@ -6,6 +6,7 @@ import {
   requestPersistentStorage,
 } from "./deviceStore";
 import { initAutoLock, loadLockSettings, saveLockSettings } from "./autoLock";
+import { loadTheme, saveTheme, type ThemeChoice } from "./theme";
 import { keyProtector, unlockErrorMessage } from "./keyProtector";
 import type { LoginResult, SyncedVault } from "./loginArea";
 import {
@@ -760,7 +761,7 @@ export function initContentArea(
     container.innerHTML = "";
     if (!currentData || currentData.history.length === 0) {
       const empty = document.createElement("p");
-      empty.style.cssText = "color:#6b7280;font-style:italic;margin:0.5em 0";
+      empty.className = "pm-empty-note";
       empty.textContent = "No history yet.";
       container.appendChild(empty);
       return;
@@ -1305,6 +1306,14 @@ export function initContentArea(
     }
   });
 
+  // ── Appearance (this device only) ───────────────────────────────────────
+  const themeSelect = deviceDetails.querySelector(
+    "select[name='theme']",
+  ) as HTMLSelectElement;
+  themeSelect.addEventListener("change", () => {
+    saveTheme(themeSelect.value as ThemeChoice);
+  });
+
   // ── Auto-lock settings (this device only) ───────────────────────────────
   const idleLockSelect = deviceDetails.querySelector(
     "select[name='idle-lock']",
@@ -1429,6 +1438,7 @@ export function initContentArea(
       remembered = remember;
       renderDeviceSection();
       renderLockSettings();
+      themeSelect.value = loadTheme();
       autoLock.start();
       if (remember) void rememberAccount();
       if (changed) void keysChanged();

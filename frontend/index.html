@@ -5,7 +5,27 @@
     <meta http-equiv="X-UA-Compatible" content="IE=edge" />
     <title>Firaxite Password Manager</title>
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="theme-color" content="#ffffff" />
+    <meta
+      name="theme-color"
+      content="#ffffff"
+      media="(prefers-color-scheme: light)"
+      data-scheme="light"
+    />
+    <meta
+      name="theme-color"
+      content="#1f2937"
+      media="(prefers-color-scheme: dark)"
+      data-scheme="dark"
+    />
+    <script>
+      // Applies a theme chosen under This Device before the page is drawn,
+      // to avoid a flash of the other one (see theme.ts)
+      try {
+        var theme = localStorage.getItem("passman.theme");
+        if (theme === "light" || theme === "dark")
+          document.documentElement.dataset.theme = theme;
+      } catch (e) {}
+    </script>
     <meta name="apple-mobile-web-app-title" content="Passman" />
     <link rel="manifest" href="manifest.webmanifest" />
     <link rel="icon" href="icons/shield_lock.svg" type="image/svg+xml" />
@@ -793,6 +813,18 @@
               <p name="biometric-message" class="pm-chg-pass-status"></p>
             </div>
             <!-- Device-wide: stored in localStorage, not in the account -->
+            <div name="appearance" class="pm-device-subsection">
+              <div class="pm-form-field">
+                <label for="theme"
+                  >Appearance (for every account on this device)</label
+                >
+                <select name="theme" id="theme">
+                  <option value="auto">Match this device</option>
+                  <option value="light">Light</option>
+                  <option value="dark">Dark</option>
+                </select>
+              </div>
+            </div>
             <div name="lock-settings" class="pm-device-subsection">
               <p class="pm-device-status">
                 Auto-lock (for every account on this device)
