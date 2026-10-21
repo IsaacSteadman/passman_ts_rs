@@ -38,6 +38,8 @@ export interface ContentAreaHandle {
   /** Records changes made to the data outside the tables (history), shows
    *  them and saves. */
   recordChanges(entries: HistoryEntry[]): Promise<void>;
+  /** Runs `task` without locking when the app is hidden meanwhile. */
+  suspendAutoLock(task: () => Promise<void>): Promise<void>;
 }
 
 /**
@@ -1399,6 +1401,10 @@ export function initContentArea(
   return {
     getCurrentData(): VaultRoot | null {
       return currentData;
+    },
+
+    suspendAutoLock(task: () => Promise<void>): Promise<void> {
+      return autoLock.suspendWhile(task);
     },
 
     async recordChanges(entries: HistoryEntry[]): Promise<void> {

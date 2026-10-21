@@ -9,6 +9,7 @@ import {
 import { initContentArea } from "./contentArea";
 import { initLockScreen } from "./lockScreen";
 import { initPassgenPanel } from "./passgenPanel";
+import { initImportExportPanel } from "./importExportPanel";
 import { initTheme } from "./theme";
 
 initTheme();
@@ -58,6 +59,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   const contentHandle = initContentArea(contentDiv, (lockedAccountId) => {
     // onLock — restore the auth card and ensure the Login tab is active
     passgenHandle.clear();
+    importExportHandle.clear();
     contentDiv.style.display = "none";
     loginDiv.style.display = "";
     if (authWrap) authWrap.style.display = "";
@@ -67,6 +69,11 @@ document.addEventListener("DOMContentLoaded", async () => {
   const passgenHandle = initPassgenPanel(
     () => contentHandle.getCurrentData()?.tables ?? null,
     (entries) => contentHandle.recordChanges(entries),
+  );
+  const importExportHandle = initImportExportPanel(
+    () => contentHandle.getCurrentData()?.tables ?? null,
+    (entries) => contentHandle.recordChanges(entries),
+    (task) => contentHandle.suspendAutoLock(task),
   );
 
   const onLogin = (result: LoginResult) => {

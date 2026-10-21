@@ -588,6 +588,137 @@
         </div>
         <!-- /passgen-panel -->
 
+        <!-- Import & Export: backups, exports and other managers' CSV files -->
+        <details name="import-export" class="pm-chg-pass-details">
+          <summary>
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke-width="1.5"
+              stroke="currentColor"
+              aria-hidden="true"
+            >
+              <path
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21
+                       18.75V16.5m-13.5-9L12 3m0 0 4.5 4.5M12 3v13.5"
+              />
+            </svg>
+            Import &amp; Export
+          </summary>
+          <div class="pm-chg-pass-body">
+            <form name="backup">
+              <p class="pm-device-status">
+                <strong>Encrypted backup.</strong> Your tables (not the history)
+                in a file protected by a password you choose. It can be imported
+                into any Passman account.
+              </p>
+              <div class="pm-form-field">
+                <label for="backup-pass">Backup password</label>
+                <input
+                  type="password"
+                  name="backup-pass"
+                  id="backup-pass"
+                  autocomplete="new-password"
+                />
+              </div>
+              <div class="pm-form-field">
+                <label for="backup-pass-confirm">Confirm backup password</label>
+                <input
+                  type="password"
+                  name="backup-pass-confirm"
+                  id="backup-pass-confirm"
+                  autocomplete="new-password"
+                />
+              </div>
+              <div class="pm-device-actions">
+                <button
+                  type="submit"
+                  name="download-backup"
+                  class="pm-btn pm-btn-primary"
+                >
+                  Download encrypted backup
+                </button>
+              </div>
+              <p name="backup-status" class="pm-chg-pass-status"></p>
+            </form>
+
+            <div class="pm-device-subsection">
+              <p class="pm-device-status">
+                <strong>Unencrypted export.</strong> Your tables as JSON, for
+                moving to another app. Anyone with the file can read every
+                password in it.
+              </p>
+              <div class="pm-device-actions">
+                <button
+                  type="button"
+                  name="download-export"
+                  class="pm-btn pm-btn-ghost"
+                >
+                  Download unencrypted export
+                </button>
+              </div>
+            </div>
+
+            <form name="import" class="pm-device-subsection">
+              <p class="pm-device-status">
+                <strong>Import.</strong> A Passman backup or export, or a CSV
+                file exported from Bitwarden, 1Password, Chrome, Firefox or
+                Safari. Entries are added as new tables; nothing is replaced.
+              </p>
+              <div class="pm-form-field">
+                <label for="import-file">File</label>
+                <input
+                  type="file"
+                  name="import-file"
+                  id="import-file"
+                  accept=".passman,.json,.csv,text/csv,application/json"
+                />
+              </div>
+              <!-- Shown for encrypted backups -->
+              <div name="import-unlock" class="pm-form-field" hidden>
+                <label for="import-pass">Backup password</label>
+                <input
+                  type="password"
+                  name="import-pass"
+                  id="import-pass"
+                  autocomplete="off"
+                />
+              </div>
+              <div name="import-preview" class="pm-import-preview" hidden></div>
+              <div class="pm-device-actions">
+                <button
+                  type="submit"
+                  name="unlock-import"
+                  class="pm-btn pm-btn-primary"
+                  hidden
+                >
+                  Open backup
+                </button>
+                <button
+                  type="submit"
+                  name="confirm-import"
+                  class="pm-btn pm-btn-primary"
+                  hidden
+                >
+                  Import
+                </button>
+                <button
+                  type="button"
+                  name="cancel-import"
+                  class="pm-btn pm-btn-ghost"
+                  hidden
+                >
+                  Cancel
+                </button>
+              </div>
+              <p name="import-status" class="pm-chg-pass-status"></p>
+            </form>
+          </div>
+        </details>
+
         <!-- Change password -->
         <details name="change-password" class="pm-chg-pass-details">
           <summary>
