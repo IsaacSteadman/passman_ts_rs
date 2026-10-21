@@ -588,6 +588,10 @@ table.pm-table {
 *::after {
   box-sizing: border-box;
 }
+// the hidden attribute always hides, even where a rule sets display
+[hidden] {
+  display: none !important;
+}
 body {
   margin: 0;
   font-family:
@@ -1278,6 +1282,56 @@ a {
       outline: none;
       border-color: var(--pm-accent-fg);
       box-shadow: 0 0 0 3px var(--pm-focus-ring);
+    }
+  }
+}
+
+// MFA code shown in a table cell, with the time left until it changes
+.pm-otp {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5em;
+  vertical-align: middle;
+}
+.pm-otp-code {
+  font-family: monospace;
+  font-size: 1.15em;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  &.pm-otp-invalid {
+    font-family: inherit;
+    font-size: 0.9em;
+    font-weight: normal;
+    color: var(--pm-danger);
+  }
+}
+.pm-otp-timer {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.2em;
+  font-size: 0.8em;
+  font-variant-numeric: tabular-nums;
+  color: var(--pm-text-muted);
+  svg {
+    width: 16px;
+    height: 16px;
+    transform: rotate(-90deg);
+  }
+  circle {
+    fill: none;
+    stroke-width: 3;
+  }
+  .pm-otp-track {
+    stroke: var(--pm-border-muted);
+  }
+  .pm-otp-left {
+    stroke: var(--pm-accent-fg);
+    transition: stroke-dashoffset 0.3s linear;
+  }
+  &.pm-otp-expiring {
+    color: var(--pm-danger);
+    .pm-otp-left {
+      stroke: var(--pm-danger);
     }
   }
 }
