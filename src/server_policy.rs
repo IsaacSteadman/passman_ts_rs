@@ -82,11 +82,10 @@ impl Drop for RollbackHandle {
                 inner: InnerPolicyConfig::LimitedPolicy { data, .. },
                 ..
             }) = writer.get_mut(&key)
+                && let Some(new_num_accounts) = data.num_accounts.checked_sub(1)
             {
-                if let Some(new_num_accounts) = data.num_accounts.checked_sub(1) {
-                    data.num_accounts = new_num_accounts;
-                    storage.notify.notify_one();
-                }
+                data.num_accounts = new_num_accounts;
+                storage.notify.notify_one();
             }
         });
     }
@@ -189,12 +188,6 @@ pub struct PolicyParams {
     pub server_ns: Option<String>,
 }
 
-pub enum GetPolicyErr {
-    ConflictRetryRecommended,
-    ServerPolicyNotFound,
-    ServerPolicyBadPassword,
-}
-
 impl PolicyStorage {
     pub async fn new(
         base_dir: &Path,
@@ -292,11 +285,11 @@ impl PolicyStorage {
                     InnerPolicyConfig::RootPolicy => Ok(LenReadChecker::AlwaysPass),
                 }
             } else {
-                return Err(HttpResponse::BadRequest().json(json!({
+                Err(HttpResponse::BadRequest().json(json!({
                     "type": "E_SERVER_NS",
                     "params": ["server_ns", "Passman-Server-Pass"],
                     "message": "unrecognized server_ns or server_pass"
-                })));
+                })))
             }
         } else if subtle::ConstantTimeEq::ct_eq(
             self.config.server_access_password.as_bytes(),
@@ -390,11 +383,11 @@ impl PolicyStorage {
                     }
                 }
             } else {
-                return Err(HttpResponse::BadRequest().json(json!({
+                Err(HttpResponse::BadRequest().json(json!({
                     "type": "E_SERVER_NS",
                     "params": ["server_ns", "Passman-Server-Pass"],
                     "message": "unrecognized server_ns or server_pass"
-                })));
+                })))
             }
         } else if subtle::ConstantTimeEq::ct_eq(
             self.config.server_access_password.as_bytes(),
@@ -446,11 +439,11 @@ impl PolicyStorage {
                     }),
                 }
             } else {
-                return Err(HttpResponse::BadRequest().json(json!({
+                Err(HttpResponse::BadRequest().json(json!({
                     "type": "E_SERVER_NS",
                     "params": ["server_ns", "Passman-Server-Pass"],
                     "message": "unrecognized server_ns or server_pass"
-                })));
+                })))
             }
         } else if subtle::ConstantTimeEq::ct_eq(
             self.config.server_access_password.as_bytes(),

@@ -131,9 +131,8 @@ pub async fn route(
                             "message": "request payload is larger than specified Content-Length"
                         }));
                     }
-                    match wf.write_chunk(&chunk).await {
-                        Err(e) => return e,
-                        _ => {}
+                    if let Err(e) = wf.write_chunk(&chunk).await {
+                        return e;
                     }
                 }
                 Err(e) => {
@@ -163,9 +162,8 @@ pub async fn route(
                     if let Err(e) = len_checker.check_len(accum_total_len).await {
                         return e;
                     }
-                    match wf.write_chunk(&chunk).await {
-                        Err(e) => return e,
-                        _ => {}
+                    if let Err(e) = wf.write_chunk(&chunk).await {
+                        return e;
                     }
                 }
                 Err(e) => {

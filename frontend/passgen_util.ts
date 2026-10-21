@@ -13,8 +13,7 @@ export interface PassgenOptions {
 }
 
 export type PassgenLength =
-  | { type: "nchars"; nChars: number }
-  | { type: "bits"; nBits: number };
+  { type: "nchars"; nChars: number } | { type: "bits"; nBits: number };
 
 export function estimateBits(nChars: number, options: PassgenOptions): number {
   let nBits = 0;

@@ -85,12 +85,13 @@ pub fn xchacha20_encrypt(key: &[u8], nonce: &[u8], plaintext: &[u8]) -> Result<V
             key.len()
         ))
     })?;
-    let nonce = XNonce::from_slice(nonce.try_into().map_err(|_| {
+    let nonce: &[u8; XCHACHA20_NONCE_SIZE] = nonce.try_into().map_err(|_| {
         JsError::new(&format!(
             "nonce must be {XCHACHA20_NONCE_SIZE} bytes, got {}",
             nonce.len()
         ))
-    })?);
+    })?;
+    let nonce = XNonce::from_slice(nonce);
     XChaCha20Poly1305::new(key.into())
         .encrypt(nonce, plaintext)
         .map_err(|e| JsError::new(&format!("encrypt error: {e}")))
@@ -111,12 +112,13 @@ pub fn xchacha20_decrypt(key: &[u8], nonce: &[u8], ciphertext: &[u8]) -> Result<
             key.len()
         ))
     })?;
-    let nonce = XNonce::from_slice(nonce.try_into().map_err(|_| {
+    let nonce: &[u8; XCHACHA20_NONCE_SIZE] = nonce.try_into().map_err(|_| {
         JsError::new(&format!(
             "nonce must be {XCHACHA20_NONCE_SIZE} bytes, got {}",
             nonce.len()
         ))
-    })?);
+    })?;
+    let nonce = XNonce::from_slice(nonce);
     XChaCha20Poly1305::new(key.into())
         .decrypt(nonce, ciphertext)
         .map_err(|_| JsError::new("decryption failed: authentication tag mismatch or corrupt data"))

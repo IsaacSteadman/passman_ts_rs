@@ -3,7 +3,7 @@ use actix_web::{
     http::header::{CACHE_CONTROL, CONNECTION, HOST, HeaderValue, TRANSFER_ENCODING},
     web,
 };
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub enum FrontendMode {
     /// Proxy all unmatched requests to a frontend dev server (e.g. parcel serve).
@@ -66,7 +66,7 @@ async fn dev_proxy(req: &HttpRequest, body: web::Bytes, base_url: &str) -> HttpR
 /// in every other file name.
 const UNHASHED_FILES: &[&str] = &["index.html", "manifest.webmanifest", "sw.js"];
 
-fn serve_static(req: &HttpRequest, dir: &PathBuf) -> HttpResponse {
+fn serve_static(req: &HttpRequest, dir: &Path) -> HttpResponse {
     let rel = req.path().trim_start_matches('/');
     let candidate = if rel.is_empty() {
         dir.join("index.html")

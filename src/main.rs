@@ -106,7 +106,7 @@ mod tests {
 
     fn b64url_encode(bytes: &[u8]) -> String {
         const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-        let mut out = String::with_capacity((bytes.len() * 4 + 2) / 3);
+        let mut out = String::with_capacity((bytes.len() * 4).div_ceil(3));
         for chunk in bytes.chunks(3) {
             let b0 = chunk[0] as usize;
             let b1 = if chunk.len() > 1 {

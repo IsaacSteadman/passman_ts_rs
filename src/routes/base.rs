@@ -25,7 +25,7 @@ pub const NEW_AUTH_KEY_HEADER: &str = "Passman-New-Auth-Key";
 /// percent-encoded (`encodeURIComponent`), since header values must be ASCII
 pub const SERVER_PASS_HEADER: &str = "Passman-Server-Pass";
 
-#[repr(packed)]
+#[repr(C, packed)]
 pub struct UserDataHeader {
     pub hash: [u8; HASH_SIZE],
     pub salt: [u8; HASH_SIZE],
@@ -95,7 +95,7 @@ impl AppState {
         password: &str,
         password_header_name: &str,
     ) -> Result<GetUser<'_>, HttpResponse> {
-        validate_username(&username)?;
+        validate_username(username)?;
         let password = validate_password(password, password_header_name)?;
         let user_locks = self.user_locks.read().await;
         let user_path = self.server_data_dir.join(username);
@@ -156,18 +156,15 @@ impl AppState {
         };
         let argon2 = self.argon2_params.make();
         let mut actual_hash = [0; HASH_SIZE];
-        match argon2.hash_password_into(&password, &udh.salt, &mut actual_hash) {
-            Err(e) => {
-                eprintln!(
-                    "Error occured attempting to hash password\n  e={e:?}\n  username={username:?}\n  path={user_path:?}"
-                );
-                return Err(HttpResponse::BadRequest().json(json!({
-                    "type": "E_AUTH",
-                    "params": ["username", password_header_name],
-                    "message": "username or password is incorrect",
-                })));
-            }
-            _ => {}
+        if let Err(e) = argon2.hash_password_into(&password, &udh.salt, &mut actual_hash) {
+            eprintln!(
+                "Error occured attempting to hash password\n  e={e:?}\n  username={username:?}\n  path={user_path:?}"
+            );
+            return Err(HttpResponse::BadRequest().json(json!({
+                "type": "E_AUTH",
+                "params": ["username", password_header_name],
+                "message": "username or password is incorrect",
+            })));
         }
         let expected: &[u8] = &udh.hash;
         let actual: &[u8] = &actual_hash;
@@ -283,15 +280,15 @@ pub fn parse_b64(data: &[u8]) -> anyhow::Result<Vec<u8>> {
             values[i] = parse_b64_digit(v)?;
         }
         res.push((values[0] << 2) | (values[1] >> 4));
-        if let Some(ch) = chunk.get(2) {
-            if b'='.ne(ch) {
-                res.push((values[1] << 4) | (values[2] >> 2));
-            }
+        if let Some(ch) = chunk.get(2)
+            && b'='.ne(ch)
+        {
+            res.push((values[1] << 4) | (values[2] >> 2));
         }
-        if let Some(ch) = chunk.get(3) {
-            if b'='.ne(ch) {
-                res.push((values[2] << 6) | values[3]);
-            }
+        if let Some(ch) = chunk.get(3)
+            && b'='.ne(ch)
+        {
+            res.push((values[2] << 6) | values[3]);
         }
     }
     Ok(res)
@@ -690,8 +687,7 @@ impl ReadyToReplace {
                     })))
                 }
                 _ => Ok(Replaced {
-                    guard,
-                    replace_target_path,
+                    _guard: guard,
                     last_modified,
                     etag,
                 }),
@@ -730,8 +726,8 @@ impl Drop for ReadyToReplace {
 }
 
 pub struct Replaced {
-    guard: OwnedRwLockWriteGuard<UserT>,
-    replace_target_path: PathBuf,
+    /// Keeps the user locked until the response is built from this.
+    _guard: OwnedRwLockWriteGuard<UserT>,
     pub last_modified: header::HttpDate,
     pub etag: header::EntityTag,
 }
@@ -811,7 +807,7 @@ mod tests {
     /// Encodes bytes as URL-safe base64 without padding (matches the frontend).
     fn b64url_encode(bytes: &[u8]) -> String {
         const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-        let mut out = String::with_capacity((bytes.len() * 4 + 2) / 3);
+        let mut out = String::with_capacity((bytes.len() * 4).div_ceil(3));
         for chunk in bytes.chunks(3) {
             let b0 = chunk[0] as usize;
             let b1 = if chunk.len() > 1 {
