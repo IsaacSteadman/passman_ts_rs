@@ -7,6 +7,7 @@ import {
 } from "./deviceStore";
 import { initAutoLock, loadLockSettings, saveLockSettings } from "./autoLock";
 import { loadTheme, saveTheme, type ThemeChoice } from "./theme";
+import { matchingRows, searchTerms } from "./vaultSearch";
 import { keyProtector, unlockErrorMessage } from "./keyProtector";
 import type { LoginResult, SyncedVault } from "./loginArea";
 import {
@@ -879,6 +880,7 @@ export function initContentArea(
   function render(): void {
     if (currentData == null) return;
     dataDiv.innerHTML = "";
+    renderedTables = [];
     showSavedStatus();
 
     currentData.tables.forEach((table) => {
@@ -897,6 +899,7 @@ export function initContentArea(
         });
       });
       dataDiv.appendChild(tableDiv);
+      renderedTables.push({ table, div: tableDiv });
     });
 
     const addButton = document.createElement("button");
@@ -926,6 +929,9 @@ export function initContentArea(
         });
       });
       dataDiv.insertBefore(tableDiv, addButton);
+      renderedTables.push({ table, div: tableDiv });
+      // a new table stays visible, even if it doesn't match the search
+      searchEmpty.hidden = true;
       await callbacks.onAction({
         kind: "table-add",
         timestamp: new Date().toISOString(),
@@ -951,7 +957,65 @@ export function initContentArea(
     details.append(summary, list);
     dataDiv.appendChild(details);
     historyDetails = details;
+    applySearch();
   }
+
+  // ── Search ────────────────────────────────────────────────────────────────
+  const searchInput = contentDiv.querySelector(
+    "input[name='vault-search']",
+  ) as HTMLInputElement;
+  const searchEmpty = contentDiv.querySelector(
+    "[name='search-empty']",
+  ) as HTMLElement;
+  let renderedTables: { table: PassTableData; div: HTMLDivElement }[] = [];
+
+  /** Shows only the tables and rows matching the search. Rows added or
+   *  edited meanwhile stay as they are until the search changes. */
+  function applySearch(): void {
+    const terms = searchTerms(searchInput.value);
+    let found = 0;
+    for (const { table, div } of renderedTables) {
+      const matches = matchingRows(table, terms);
+      const rows = div.querySelectorAll<HTMLTableRowElement>(
+        "table.pm-table tbody tr",
+      );
+      rows.forEach((tr, index) => {
+        tr.hidden = !(matches[index] ?? true);
+      });
+      const visibleRows = matches.filter(Boolean).length;
+      found += visibleRows;
+      // an empty table shows while not searching
+      div.hidden = terms.length > 0 && visibleRows === 0;
+    }
+    searchEmpty.hidden = terms.length === 0 || found > 0;
+    searchEmpty.textContent = `Nothing matches "${searchInput.value.trim()}".`;
+  }
+  searchInput.addEventListener("input", applySearch);
+  searchInput.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && searchInput.value) {
+      searchInput.value = "";
+      applySearch();
+    }
+  });
+  // "/" jumps to the search box, as on many sites
+  document.addEventListener("keydown", (event) => {
+    if (
+      event.key !== "/" ||
+      currentData == null ||
+      event.ctrlKey ||
+      event.metaKey ||
+      event.altKey
+    )
+      return;
+    const target = event.target as HTMLElement | null;
+    if (
+      target?.closest("input, textarea, select, [contenteditable='true']") !=
+      null
+    )
+      return;
+    event.preventDefault();
+    searchInput.focus();
+  });
 
   // ── Button wiring ─────────────────────────────────────────────────────────
   saveButton.addEventListener("click", () => saveVault());
@@ -1384,6 +1448,9 @@ export function initContentArea(
     lastFetchTime = 0;
     // hiding is not enough: the decrypted vault would stay in the DOM
     dataDiv.innerHTML = "";
+    renderedTables = [];
+    searchInput.value = "";
+    searchEmpty.hidden = true;
     statSpan.textContent = "";
     document
       .querySelectorAll(".pm-backdrop")

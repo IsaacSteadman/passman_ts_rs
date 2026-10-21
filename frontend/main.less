@@ -1250,3 +1250,34 @@ a {
     color: var(--pm-danger);
   }
 }
+
+// Search box above the tables
+.pm-search {
+  position: relative;
+  margin-bottom: 0.75em;
+  svg {
+    position: absolute;
+    left: 0.7em;
+    top: 50%;
+    width: 18px;
+    height: 18px;
+    transform: translateY(-50%);
+    color: var(--pm-text-faint);
+    pointer-events: none;
+  }
+  input {
+    width: 100%;
+    padding: 0.55em 0.75em 0.55em 2.3em;
+    border: 1px solid var(--pm-border);
+    border-radius: 8px;
+    font-family: inherit;
+    font-size: 0.95em;
+    color: var(--pm-text);
+    background: var(--pm-surface);
+    &:focus {
+      outline: none;
+      border-color: var(--pm-accent-fg);
+      box-shadow: 0 0 0 3px var(--pm-focus-ring);
+    }
+  }
+}
