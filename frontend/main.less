@@ -1255,6 +1255,77 @@ a {
   }
 }
 
+// Shared Vaults
+.pm-shared-vault {
+  margin-top: 0.75rem;
+  summary {
+    flex-wrap: wrap;
+  }
+}
+.pm-shared-name {
+  color: var(--pm-text);
+}
+.pm-shared-meta {
+  font-size: 0.85em;
+  font-weight: 400;
+  color: var(--pm-text-muted);
+}
+.pm-shared-tables {
+  margin-bottom: 0.5rem;
+}
+.pm-member-list {
+  margin: 0 0 1rem;
+  padding: 0;
+  list-style: none;
+  li {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.35em 0;
+    border-bottom: 1px solid var(--pm-border-muted);
+  }
+  .pm-member-name {
+    flex: 1;
+  }
+  select {
+    padding: 0.25em 0.4em;
+    border: 1px solid var(--pm-border);
+    border-radius: 5px;
+    font-family: inherit;
+    color: var(--pm-text);
+    background: var(--pm-surface);
+  }
+}
+.pm-add-member {
+  margin-bottom: 1rem;
+  select {
+    padding: 0.4em 0.6em;
+    border: 1px solid var(--pm-border);
+    border-radius: 5px;
+    font-family: inherit;
+    color: var(--pm-text);
+    background: var(--pm-surface);
+  }
+}
+.pm-add-member-confirm {
+  flex-basis: 100%;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.9em;
+  .pm-field-hint {
+    flex-basis: 100%;
+    margin: 0;
+  }
+}
+.pm-btn.pm-danger-text {
+  color: var(--pm-danger);
+}
+#shared-vaults > .pm-inline-form {
+  margin-top: 1rem;
+}
+
 // Search box above the tables
 .pm-search {
   position: relative;

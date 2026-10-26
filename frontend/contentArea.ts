@@ -26,6 +26,7 @@ import {
   type CellValue,
   type LinkCellData,
   type PasswordCellData,
+  type SharingKeys,
   getDefaultCellValue,
   setCellValue,
   spliceCellValue,
@@ -41,16 +42,32 @@ export interface ContentAreaHandle {
   recordChanges(entries: HistoryEntry[]): Promise<void>;
   /** Runs `task` without locking when the app is hidden meanwhile. */
   suspendAutoLock(task: () => Promise<void>): Promise<void>;
+  /** The credentials of the unlocked account, for its other server
+   *  requests (shared vaults). */
+  getSession(): Session | null;
+  getSharingKeys(): SharingKeys | null;
+  /** Adds the sharing keys to the vault and saves it; true once the server
+   *  has them. */
+  setSharingKeys(keys: SharingKeys): Promise<boolean>;
+}
+
+export interface Session {
+  username: string;
+  serverNs: string | null;
+  serverPass: string;
+  authKeyB64: string;
 }
 
 /**
  * `onLock` runs after the session ended: by Logout/Lock (`lockedAccountId`
  * null), or by auto-lock (the id of the remembered account that was locked,
- * so it can be offered for unlocking again).
+ * so it can be offered for unlocking again). Auto-lock waits while
+ * `hasOtherUnsavedChanges` (changes to shared vaults that aren't saved).
  */
 export function initContentArea(
   contentDiv: HTMLDivElement,
   onLock: (lockedAccountId: string | null) => void,
+  hasOtherUnsavedChanges: () => boolean,
 ): ContentAreaHandle {
   const dataDiv = contentDiv.querySelector(
     "div[name='data']",
@@ -1413,6 +1430,11 @@ export function initContentArea(
         "⚠ Not locked automatically: some changes aren't saved yet";
       return false;
     }
+    if (hasOtherUnsavedChanges()) {
+      statSpan.textContent =
+        "⚠ Not locked automatically: some changes to shared vaults aren't saved yet";
+      return false;
+    }
     const lockedAccountId = remembered
       ? accountId(currentUsername, currentServerNs)
       : null;
@@ -1472,6 +1494,32 @@ export function initContentArea(
 
     suspendAutoLock(task: () => Promise<void>): Promise<void> {
       return autoLock.suspendWhile(task);
+    },
+
+    getSession(): Session | null {
+      if (
+        currentUsername == null ||
+        currentServerPass == null ||
+        currentAuthKeyB64 == null
+      )
+        return null;
+      return {
+        username: currentUsername,
+        serverNs: currentServerNs,
+        serverPass: currentServerPass,
+        authKeyB64: currentAuthKeyB64,
+      };
+    },
+
+    getSharingKeys(): SharingKeys | null {
+      return currentData?.sharingKeys ?? null;
+    },
+
+    async setSharingKeys(keys: SharingKeys): Promise<boolean> {
+      if (currentData == null) return false;
+      currentData.sharingKeys = keys;
+      await saveVault();
+      return baseData?.sharingKeys?.publicKey === keys.publicKey;
     },
 
     async recordChanges(entries: HistoryEntry[]): Promise<void> {

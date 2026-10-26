@@ -5,6 +5,7 @@ use crate::{
         get_pass_table, post_pass_table, put_pass_table, put_pass_table_new_pass,
     },
     server_policy::PolicyStorage,
+    shared_vaults::SharedVaults,
 };
 use actix_web::{App, HttpServer, web};
 use std::{collections::HashMap, os::unix::fs::PermissionsExt, path::PathBuf};
@@ -13,6 +14,7 @@ use tokio::sync::RwLock;
 mod config;
 mod routes;
 mod server_policy;
+mod shared_vaults;
 
 #[actix_web::main]
 async fn main() -> anyhow::Result<()> {
@@ -41,11 +43,13 @@ async fn main() -> anyhow::Result<()> {
         .create(&server_data_dir)
         .await?;
     tokio::fs::set_permissions(&server_data_dir, std::fs::Permissions::from_mode(0o700)).await?;
+    let shared_vaults = SharedVaults::load(&server_data_dir.join(".shared")).await?;
     let app_state = web::Data::new(AppState {
         argon2_params: Argon2Params::new()?,
         policies_and_config,
         server_data_dir,
         user_locks: RwLock::new(HashMap::new()),
+        shared_vaults,
     });
     let frontend_mode = web::Data::new(if let Ok(url) = std::env::var("FRONTEND_DEV_SERVER") {
         println!("Proxying frontend requests to {url}");
@@ -63,6 +67,7 @@ async fn main() -> anyhow::Result<()> {
             .service(post_pass_table::route)
             .service(put_pass_table::route)
             .service(put_pass_table_new_pass::route)
+            .configure(routes::shared_vaults::configure)
             .default_service(web::to(routes::frontend::frontend_handler))
     })
     .bind(("127.0.0.1", 8080))?
@@ -132,8 +137,15 @@ mod tests {
     }
 
     async fn make_test_app(tmpdir: &std::path::Path) -> web::Data<AppState> {
+        make_test_app_with_policies(tmpdir, "{}").await
+    }
+
+    async fn make_test_app_with_policies(
+        tmpdir: &std::path::Path,
+        policies: &str,
+    ) -> web::Data<AppState> {
         std::fs::create_dir_all(tmpdir.join("server_data")).unwrap();
-        std::fs::write(tmpdir.join("policies.json"), b"{}").unwrap();
+        std::fs::write(tmpdir.join("policies.json"), policies).unwrap();
 
         let config = crate::config::ServerConfig {
             port: 8080,
@@ -150,6 +162,9 @@ mod tests {
             policies_and_config,
             server_data_dir: tmpdir.join("server_data"),
             user_locks: RwLock::new(HashMap::new()),
+            shared_vaults: SharedVaults::load(&tmpdir.join("server_data/.shared"))
+                .await
+                .unwrap(),
         })
     }
 
@@ -167,7 +182,8 @@ mod tests {
                     .service(routes::get_pass_table::route)
                     .service(routes::post_pass_table::route)
                     .service(routes::put_pass_table::route)
-                    .service(routes::put_pass_table_new_pass::route),
+                    .service(routes::put_pass_table_new_pass::route)
+                    .configure(routes::shared_vaults::configure),
             )
             .await
         };
@@ -462,5 +478,369 @@ mod tests {
             .to_request();
         let resp: actix_web::dev::ServiceResponse = test::call_service(&app, req).await;
         assert_eq!(resp.status().as_u16(), 400);
+    }
+
+    // ── Shared vaults ────────────────────────────────────────────────────────
+
+    /// A user registered on the test app, with the credentials to act as them.
+    struct TestUser {
+        name: &'static str,
+        auth_key: String,
+        /// `None` for the server access password, else this policy's
+        /// namespace (whose password is "pw").
+        server_ns: Option<&'static str>,
+    }
+
+    impl TestUser {
+        fn new(name: &'static str, server_ns: Option<&'static str>) -> Self {
+            Self {
+                name,
+                auth_key: derive_client_auth_key(name, "pw"),
+                server_ns,
+            }
+        }
+
+        /// A request to `path` (with or without a query) as this user.
+        fn req(&self, req: test::TestRequest, path: &str) -> test::TestRequest {
+            let sep = if path.contains('?') { '&' } else { '?' };
+            let mut uri = format!("{path}{sep}username={}", self.name);
+            let server_pass = match self.server_ns {
+                Some(ns) => {
+                    uri.push_str(&format!("&server_ns={ns}"));
+                    "pw"
+                }
+                None => "testpass",
+            };
+            req.uri(&uri)
+                .insert_header((routes::base::AUTH_KEY_HEADER, self.auth_key.as_str()))
+                .insert_header((routes::base::SERVER_PASS_HEADER, server_pass))
+        }
+    }
+
+    /// Base64 of `len` copies of `byte`, standing in for keys and ciphertext.
+    fn fake_b64(byte: u8, len: usize) -> String {
+        b64url_encode(&vec![byte; len])
+    }
+
+    macro_rules! call {
+        ($app:expr, $req:expr) => {{
+            let resp: actix_web::dev::ServiceResponse =
+                test::call_service(&$app, $req.to_request()).await;
+            resp
+        }};
+    }
+
+    /// Calls and returns the status and JSON body.
+    macro_rules! call_json {
+        ($app:expr, $req:expr) => {{
+            let resp = call!($app, $req);
+            let status = resp.status().as_u16();
+            let body = test::read_body(resp).await;
+            let json: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
+            (status, json)
+        }};
+    }
+
+    /// Registers the users and publishes a sharing key for each (their key
+    /// is 32 copies of their index + 1).
+    macro_rules! setup_users {
+        ($app:expr, $($user:expr),+) => {{
+            for (i, user) in [$(&$user),+].into_iter().enumerate() {
+                let req = user
+                    .req(test::TestRequest::post(), "/pass-table")
+                    .insert_header(("Content-Length", "64"))
+                    .set_payload(vec![0u8; 64]);
+                assert_eq!(call!($app, req).status().as_u16(), 201);
+                let req = user
+                    .req(test::TestRequest::put(), "/sharing-key")
+                    .set_json(json!({ "publicKey": fake_b64(i as u8 + 1, 32) }));
+                assert_eq!(call!($app, req).status().as_u16(), 200);
+            }
+        }};
+    }
+
+    macro_rules! create_vault {
+        ($app:expr, $user:expr, $key_byte:expr) => {{
+            let req = $user
+                .req(test::TestRequest::post(), "/shared-vaults")
+                .set_json(json!({
+                    "encryptedName": fake_b64(9, 40),
+                    "wrappedKey": fake_b64(7, 80),
+                    "publicKey": fake_b64($key_byte, 32),
+                }));
+            call_json!($app, req)
+        }};
+    }
+
+    use serde_json::json;
+
+    /// Owners add members, members read and save, and non-members can't tell
+    /// the vault exists.
+    #[actix_web::test]
+    async fn shared_vault_membership() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let state = make_test_app(tmpdir.path()).await;
+        let app = init_app!(state);
+        let alice = TestUser::new("alice", None);
+        let bob = TestUser::new("bob", None);
+        setup_users!(app, alice, bob);
+
+        let (status, body) = create_vault!(app, alice, 1);
+        assert_eq!(status, 201);
+        let id = body["id"].as_str().unwrap().to_string();
+        let data = format!("/shared-vaults/{id}/data");
+
+        let (_, list) = call_json!(app, alice.req(test::TestRequest::get(), "/shared-vaults"));
+        assert_eq!(list["vaults"][0]["id"], id.as_str());
+        assert_eq!(list["vaults"][0]["role"], "Owner");
+        assert_eq!(list["vaults"][0]["size"], 0);
+        let (_, list) = call_json!(app, bob.req(test::TestRequest::get(), "/shared-vaults"));
+        assert_eq!(list["vaults"], json!([]));
+        let resp = call!(app, bob.req(test::TestRequest::get(), &data));
+        assert_eq!(resp.status().as_u16(), 404);
+
+        // the member's sharing key must be the one the vault key was sealed to
+        let member = format!("/shared-vaults/{id}/members/bob");
+        let add = |public_key: String| {
+            alice
+                .req(test::TestRequest::put(), &member)
+                .set_json(json!({
+                    "role": "Editor",
+                    "wrappedKey": fake_b64(8, 80),
+                    "publicKey": public_key,
+                }))
+        };
+        let (status, body) = call_json!(app, add(fake_b64(1, 32)));
+        assert_eq!(
+            (status, body["type"].as_str()),
+            (409, Some("E_SHARING_KEY_CHANGED"))
+        );
+        assert_eq!(call!(app, add(fake_b64(2, 32))).status().as_u16(), 200);
+
+        let (_, list) = call_json!(app, bob.req(test::TestRequest::get(), "/shared-vaults"));
+        assert_eq!(list["vaults"][0]["role"], "Editor");
+        assert_eq!(list["vaults"][0]["wrappedKey"], fake_b64(8, 80));
+        assert_eq!(list["vaults"][0]["members"].as_array().unwrap().len(), 2);
+
+        // bob saves, alice reads it back
+        let resp = call!(app, bob.req(test::TestRequest::get(), &data));
+        let etag = resp.headers().get("ETag").unwrap().clone();
+        assert!(test::read_body(resp).await.is_empty());
+        let req = bob
+            .req(test::TestRequest::put(), &data)
+            .insert_header(("If-Match", etag.clone()))
+            .insert_header(("Content-Length", "5"))
+            .set_payload(b"hello".to_vec());
+        assert_eq!(call!(app, req).status().as_u16(), 200);
+        let resp = call!(app, alice.req(test::TestRequest::get(), &data));
+        assert_eq!(test::read_body(resp).await, b"hello".to_vec());
+        // a save based on the old version is refused
+        let req = alice
+            .req(test::TestRequest::put(), &data)
+            .insert_header(("If-Match", etag))
+            .insert_header(("Content-Length", "3"))
+            .set_payload(b"old".to_vec());
+        assert_eq!(call!(app, req).status().as_u16(), 412);
+
+        // only owners manage the vault
+        let resp = call!(
+            app,
+            bob.req(test::TestRequest::delete(), &format!("/shared-vaults/{id}"))
+        );
+        assert_eq!(resp.status().as_u16(), 403);
+        let resp = call!(
+            app,
+            bob.req(
+                test::TestRequest::delete(),
+                &format!("/shared-vaults/{id}/members/alice")
+            )
+        );
+        assert_eq!(resp.status().as_u16(), 403);
+        // and the last owner can't leave
+        let (status, body) = call_json!(
+            app,
+            alice.req(
+                test::TestRequest::delete(),
+                &format!("/shared-vaults/{id}/members/alice")
+            )
+        );
+        assert_eq!((status, body["type"].as_str()), (409, Some("E_LAST_OWNER")));
+        let (status, body) = call_json!(
+            app,
+            alice
+                .req(
+                    test::TestRequest::put(),
+                    &format!("/shared-vaults/{id}/members/alice")
+                )
+                .set_json(json!({ "role": "Editor" }))
+        );
+        assert_eq!((status, body["type"].as_str()), (409, Some("E_LAST_OWNER")));
+
+        // a removed member loses access
+        assert_eq!(
+            call!(app, alice.req(test::TestRequest::delete(), &member))
+                .status()
+                .as_u16(),
+            200
+        );
+        let resp = call!(app, bob.req(test::TestRequest::get(), &data));
+        assert_eq!(resp.status().as_u16(), 404);
+
+        // deleting removes the files; the vault survives a restart until then
+        let state2 = make_test_app_with_policies(tmpdir.path(), "{}").await;
+        assert!(state2.shared_vaults.vaults.read().await.contains_key(&id));
+        let resp = call!(
+            app,
+            alice.req(test::TestRequest::delete(), &format!("/shared-vaults/{id}"))
+        );
+        assert_eq!(resp.status().as_u16(), 200);
+        let vaults_dir = tmpdir.path().join("server_data/.shared/vaults");
+        assert_eq!(std::fs::read_dir(vaults_dir).unwrap().count(), 0);
+    }
+
+    /// A sharing key can be replaced until vault keys have been sealed to it.
+    #[actix_web::test]
+    async fn sharing_key_is_fixed_once_in_use() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let state = make_test_app(tmpdir.path()).await;
+        let app = init_app!(state);
+        let alice = TestUser::new("alice", None);
+        setup_users!(app, alice);
+        let put_key = |byte: u8| {
+            alice
+                .req(test::TestRequest::put(), "/sharing-key")
+                .set_json(json!({ "publicKey": fake_b64(byte, 32) }))
+        };
+        assert_eq!(call!(app, put_key(5)).status().as_u16(), 200);
+        let (status, _) = create_vault!(app, alice, 5);
+        assert_eq!(status, 201);
+        let (status, body) = call_json!(app, put_key(6));
+        assert_eq!(
+            (status, body["type"].as_str()),
+            (409, Some("E_SHARING_KEY_IN_USE"))
+        );
+        // publishing the same key again is fine
+        assert_eq!(call!(app, put_key(5)).status().as_u16(), 200);
+        // keys must be 32 bytes
+        let req = alice
+            .req(test::TestRequest::put(), "/sharing-key")
+            .set_json(json!({ "publicKey": fake_b64(5, 31) }));
+        assert_eq!(call!(app, req).status().as_u16(), 400);
+
+        let (status, body) = call_json!(
+            app,
+            alice.req(test::TestRequest::get(), "/sharing-key?user=nobody")
+        );
+        assert_eq!(
+            (status, body["type"].as_str()),
+            (404, Some("E_NO_SHARING_KEY"))
+        );
+        let (status, body) = call_json!(app, alice.req(test::TestRequest::get(), "/sharing-key"));
+        assert_eq!(
+            (status, body["publicKey"].clone()),
+            (200, json!(fake_b64(5, 32)))
+        );
+    }
+
+    /// A limited policy caps how many shared vaults are created under it, and
+    /// their size and members, separately from its accounts.
+    #[actix_web::test]
+    async fn shared_vault_policy_limits() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let state = make_test_app_with_policies(
+            tmpdir.path(),
+            r#"{
+                "team": {"Password":"pw","PolicyType":"LIMITED_POLICY","MaxAccounts":3,"NumAccounts":0,"MaxDataSize":1000,
+                         "MaxSharedVaults":1,"MaxSharedVaultDataSize":10,"MaxSharedVaultMembers":2},
+                "old": {"Password":"pw","PolicyType":"LIMITED_POLICY","MaxAccounts":3,"NumAccounts":0,"MaxDataSize":1000}
+            }"#,
+        )
+        .await;
+        let app = init_app!(state);
+        let alice = TestUser::new("alice", Some("team"));
+        let bob = TestUser::new("bob", Some("team"));
+        let carol = TestUser::new("carol", Some("team"));
+        let dave = TestUser::new("dave", Some("old"));
+        setup_users!(app, alice, bob, carol, dave);
+
+        // policies without the shared vault fields don't allow any
+        let (status, body) = create_vault!(app, dave, 4);
+        assert_eq!((status, body["type"].as_str()), (400, Some("E_POLICY")));
+
+        let (status, body) = create_vault!(app, alice, 1);
+        assert_eq!(status, 201);
+        let id = body["id"].as_str().unwrap().to_string();
+        let (status, body) = create_vault!(app, bob, 2);
+        assert_eq!((status, body["type"].as_str()), (400, Some("E_POLICY")));
+
+        let (_, list) = call_json!(app, alice.req(test::TestRequest::get(), "/shared-vaults"));
+        assert_eq!(list["vaults"][0]["maxDataSize"], 10);
+        assert_eq!(list["vaults"][0]["maxMembers"], 2);
+
+        // the vault's own limit applies, not the account limit (1000)
+        let data = format!("/shared-vaults/{id}/data");
+        let resp = call!(app, alice.req(test::TestRequest::get(), &data));
+        let etag = resp.headers().get("ETag").unwrap().clone();
+        test::read_body(resp).await;
+        let save = |len: usize| {
+            alice
+                .req(test::TestRequest::put(), &data)
+                .insert_header(("If-Match", etag.clone()))
+                .insert_header(("Content-Length", len.to_string()))
+                .set_payload(vec![1u8; len])
+        };
+        let (status, body) = call_json!(app, save(11));
+        assert_eq!((status, body["type"].as_str()), (400, Some("E_POLICY")));
+        assert_eq!(call!(app, save(10)).status().as_u16(), 200);
+
+        // and its member limit
+        let add = |name: &str, key_byte: u8| {
+            alice
+                .req(
+                    test::TestRequest::put(),
+                    &format!("/shared-vaults/{id}/members/{name}"),
+                )
+                .set_json(json!({
+                    "role": "Editor",
+                    "wrappedKey": fake_b64(8, 80),
+                    "publicKey": fake_b64(key_byte, 32),
+                }))
+        };
+        assert_eq!(call!(app, add("bob", 2)).status().as_u16(), 200);
+        let (status, body) = call_json!(app, add("carol", 3));
+        assert_eq!((status, body["type"].as_str()), (400, Some("E_POLICY")));
+        // members using other credentials still get the vault's limits:
+        // dave's policy has none of its own
+        assert_eq!(
+            call!(
+                app,
+                alice.req(
+                    test::TestRequest::delete(),
+                    &format!("/shared-vaults/{id}/members/bob")
+                )
+            )
+            .status()
+            .as_u16(),
+            200
+        );
+        assert_eq!(call!(app, add("dave", 4)).status().as_u16(), 200);
+        let resp = call!(app, dave.req(test::TestRequest::get(), &data));
+        let etag = resp.headers().get("ETag").unwrap().clone();
+        test::read_body(resp).await;
+        let req = dave
+            .req(test::TestRequest::put(), &data)
+            .insert_header(("If-Match", etag))
+            .insert_header(("Content-Length", "11"))
+            .set_payload(vec![1u8; 11]);
+        assert_eq!(call!(app, req).status().as_u16(), 400);
+
+        // deleting the vault gives the policy its count back
+        let resp = call!(
+            app,
+            alice.req(test::TestRequest::delete(), &format!("/shared-vaults/{id}"))
+        );
+        assert_eq!(resp.status().as_u16(), 200);
+        let (status, _) = create_vault!(app, bob, 2);
+        assert_eq!(status, 201);
     }
 }

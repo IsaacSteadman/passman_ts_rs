@@ -1,6 +1,10 @@
 import init, {
   derive_key,
   hash_size,
+  seal,
+  unseal,
+  x25519_generate_secret_key,
+  x25519_public_key,
   xchacha20_decrypt,
   xchacha20_encrypt,
   xchacha20_generate_nonce,
@@ -75,4 +79,46 @@ export function decryptBlob(
   const ciphertext = blob.slice(XCHACHA20_NONCE_SIZE);
   const key = encryptionKey.slice(0, XCHACHA20_KEY_SIZE);
   return xchacha20_decrypt(key, nonce, ciphertext);
+}
+
+/** Generates a key pair for sharing vaults: others seal vault keys to the
+ *  public key, and only the secret key opens them. */
+export function generateSharingKeyPair(): {
+  publicKey: Uint8Array;
+  secretKey: Uint8Array;
+} {
+  const secretKey = x25519_generate_secret_key();
+  return { publicKey: x25519_public_key(secretKey), secretKey };
+}
+
+/** Encrypts `plaintext` so only the holder of `publicKey`'s secret key can
+ *  read it (a sealed box). */
+export function sealTo(
+  publicKey: Uint8Array,
+  plaintext: Uint8Array,
+): Uint8Array {
+  return seal(publicKey, plaintext);
+}
+
+/** Opens a box from `sealTo` (throws if it was sealed to another key). */
+export function unsealWith(
+  secretKey: Uint8Array,
+  ciphertext: Uint8Array,
+): Uint8Array {
+  return unseal(secretKey, ciphertext);
+}
+
+/** URL-safe base64 without padding, as the server expects. */
+export function toBase64Url(bytes: Uint8Array): string {
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary)
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
+}
+
+export function fromBase64Url(text: string): Uint8Array<ArrayBuffer> {
+  const binary = atob(text.replace(/-/g, "+").replace(/_/g, "/"));
+  return Uint8Array.from(binary, (ch) => ch.charCodeAt(0));
 }

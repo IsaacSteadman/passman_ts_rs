@@ -90,9 +90,15 @@ export type HistoryEntry =
       tableSnapshot: PassTableData;
     };
 
+/** A key pair for sharing vaults (URL-safe base64): other users seal shared
+ *  vaults' keys to the public key, which is published on the server. */
+export type SharingKeys = { publicKey: string; secretKey: string };
+
 export type VaultRoot = {
   tables: PassTableData[];
   history: HistoryEntry[];
+  /** Only in a user's own vault, once they've set up sharing. */
+  sharingKeys?: SharingKeys;
 };
 
 export interface PassTableCallbacks {

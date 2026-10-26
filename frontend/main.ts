@@ -10,6 +10,7 @@ import { initContentArea } from "./contentArea";
 import { initLockScreen } from "./lockScreen";
 import { initPassgenPanel } from "./passgenPanel";
 import { initImportExportPanel } from "./importExportPanel";
+import { initSharedVaultsPanel } from "./sharedVaults";
 import { initTheme } from "./theme";
 
 initTheme();
@@ -56,15 +57,20 @@ document.addEventListener("DOMContentLoaded", async () => {
     ".pm-auth-wrap",
   ) as HTMLElement | null;
 
-  const contentHandle = initContentArea(contentDiv, (lockedAccountId) => {
-    // onLock — restore the auth card and ensure the Login tab is active
-    passgenHandle.clear();
-    importExportHandle.clear();
-    contentDiv.style.display = "none";
-    loginDiv.style.display = "";
-    if (authWrap) authWrap.style.display = "";
-    void lockScreen.refresh(lockedAccountId);
-  });
+  const contentHandle = initContentArea(
+    contentDiv,
+    (lockedAccountId) => {
+      // onLock — restore the auth card and ensure the Login tab is active
+      passgenHandle.clear();
+      importExportHandle.clear();
+      sharedVaultsHandle.clear();
+      contentDiv.style.display = "none";
+      loginDiv.style.display = "";
+      if (authWrap) authWrap.style.display = "";
+      void lockScreen.refresh(lockedAccountId);
+    },
+    () => sharedVaultsHandle.hasUnsavedChanges(),
+  );
 
   const passgenHandle = initPassgenPanel(
     () => contentHandle.getCurrentData()?.tables ?? null,
@@ -75,11 +81,17 @@ document.addEventListener("DOMContentLoaded", async () => {
     (entries) => contentHandle.recordChanges(entries),
     (task) => contentHandle.suspendAutoLock(task),
   );
+  const sharedVaultsHandle = initSharedVaultsPanel(
+    () => contentHandle.getSession(),
+    () => contentHandle.getSharingKeys(),
+    (keys) => contentHandle.setSharingKeys(keys),
+  );
 
   const onLogin = (result: LoginResult) => {
     errorPanel.textContent = "";
     if (authWrap) authWrap.style.display = "none";
     contentHandle.show(result);
+    sharedVaultsHandle.show();
   };
   initLoginArea(errorPanel, onLogin);
   const lockScreen = initLockScreen(errorPanel, onLogin);

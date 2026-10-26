@@ -458,6 +458,37 @@
         <!-- Password tables injected here by contentArea.ts -->
         <div name="data"></div>
 
+        <!-- Shared vaults: tables shared with other users (sharedVaults.ts) -->
+        <p class="pm-section-label">Shared Vaults</p>
+        <div id="shared-vaults">
+          <p name="shared-intro" class="pm-device-status"></p>
+          <div class="pm-device-actions">
+            <button
+              type="button"
+              name="setup-sharing"
+              class="pm-btn pm-btn-primary"
+              hidden
+            >
+              Set up sharing
+            </button>
+          </div>
+          <div name="shared-list"></div>
+          <form name="create-shared" class="pm-inline-form" hidden>
+            <input
+              type="text"
+              name="shared-name"
+              placeholder="Name for a new shared vault"
+              aria-label="Name for a new shared vault"
+              autocomplete="off"
+            />
+            <button type="submit" class="pm-btn pm-btn-primary">
+              Create shared vault
+            </button>
+          </form>
+          <p name="shared-status" class="pm-chg-pass-status"></p>
+          <p name="sharing-fingerprint" class="pm-field-hint"></p>
+        </div>
+
         <!-- Password generator (moved inside #content so it only shows when logged in) -->
         <p class="pm-section-label">Password Generator</p>
         <div id="passgen-panel">

@@ -324,11 +324,19 @@ export function mergeVaults(
     kept,
   ).map((id) => mergeTable(b.get(id), l.get(id), r.get(id), conflicts));
 
-  return {
-    merged: {
-      tables,
-      history: mergeHistory(base.history, local.history, remote.history),
-    },
-    conflicts,
+  const merged: VaultRoot = {
+    tables,
+    history: mergeHistory(base.history, local.history, remote.history),
   };
+  const sharingKeys = merge3(
+    base.sharingKeys,
+    local.sharingKeys,
+    remote.sharingKeys,
+  );
+  if (sharingKeys.conflict)
+    conflicts.push("Sharing was set up in both sessions");
+  if (sharingKeys.value != null)
+    merged.sharingKeys = structuredClone(sharingKeys.value);
+
+  return { merged, conflicts };
 }

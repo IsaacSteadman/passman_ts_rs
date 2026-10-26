@@ -148,3 +148,67 @@ pub fn derive_key(password: &str, salt: &[u8]) -> Result<Vec<u8>, JsError> {
         .map_err(|e| JsError::new(&format!("{e:?}")))?;
     Ok(output.to_vec())
 }
+
+/// Size in bytes of an X25519 public or secret key (32).
+pub const X25519_KEY_SIZE: usize = 32;
+
+/// Generates a random X25519 secret key for sharing vaults. Its public key
+/// (see [`x25519_public_key`]) is what others seal vault keys to.
+#[wasm_bindgen]
+pub fn x25519_generate_secret_key() -> Vec<u8> {
+    crypto_box::SecretKey::generate(&mut OsRng)
+        .to_bytes()
+        .to_vec()
+}
+
+fn x25519_key(key: &[u8], what: &str) -> Result<[u8; X25519_KEY_SIZE], JsError> {
+    key.try_into().map_err(|_| {
+        JsError::new(&format!(
+            "{what} must be {X25519_KEY_SIZE} bytes, got {}",
+            key.len()
+        ))
+    })
+}
+
+/// Returns the X25519 public key of `secret_key` (32 bytes each).
+#[wasm_bindgen]
+pub fn x25519_public_key(secret_key: &[u8]) -> Result<Vec<u8>, JsError> {
+    let secret_key = crypto_box::SecretKey::from(x25519_key(secret_key, "secret key")?);
+    Ok(secret_key.public_key().as_bytes().to_vec())
+}
+
+/// Encrypts `plaintext` so only the holder of `public_key`'s secret key can
+/// read it (a libsodium-compatible sealed box: an ephemeral X25519 key, then
+/// XSalsa20-Poly1305). The result is 48 bytes longer than `plaintext`.
+#[wasm_bindgen]
+pub fn seal(public_key: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, JsError> {
+    crypto_box::PublicKey::from(x25519_key(public_key, "public key")?)
+        .seal(&mut OsRng, plaintext)
+        .map_err(|e| JsError::new(&format!("seal error: {e}")))
+}
+
+/// Opens a box made by [`seal`] for `secret_key`'s public key. Throws if it
+/// was sealed for another key or has been changed.
+#[wasm_bindgen]
+pub fn unseal(secret_key: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>, JsError> {
+    crypto_box::SecretKey::from(x25519_key(secret_key, "secret key")?)
+        .unseal(ciphertext)
+        .map_err(|_| JsError::new("unseal failed: sealed for another key or corrupt data"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sealed_box_opens_only_with_matching_secret_key() {
+        let secret = x25519_generate_secret_key();
+        let public = x25519_public_key(&secret).unwrap();
+        let sealed = seal(&public, b"vault key").unwrap();
+        assert_eq!(sealed.len(), b"vault key".len() + 48);
+        assert_eq!(unseal(&secret, &sealed).unwrap(), b"vault key");
+        // (directly, since a JsError can't be made outside wasm)
+        let other = crypto_box::SecretKey::generate(&mut OsRng);
+        assert!(other.unseal(&sealed).is_err());
+    }
+}

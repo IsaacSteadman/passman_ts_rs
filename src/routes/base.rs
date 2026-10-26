@@ -1,5 +1,9 @@
-use crate::server_policy::{PolicyParams, PolicyStorage};
+use crate::{
+    server_policy::{LenAccumChecker, PolicyParams, PolicyStorage},
+    shared_vaults::SharedVaults,
+};
 use actix_web::{HttpRequest, HttpResponse, http::header, web};
+use futures_util::StreamExt;
 use percent_encoding::percent_decode_str;
 use rand::{TryRngCore, rngs::OsRng};
 use serde_json::json;
@@ -13,7 +17,8 @@ use std::{
 use subtle::ConstantTimeEq;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock},
+    sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock, mpsc},
+    time::{Instant, timeout_at},
 };
 
 pub use passman_crypto::{Argon2Params, HASH_SIZE};
@@ -86,6 +91,7 @@ pub struct AppState {
     pub server_data_dir: PathBuf,
     pub argon2_params: Argon2Params,
     pub user_locks: RwLock<HashMap<String, Arc<RwLock<UserT>>>>,
+    pub shared_vaults: SharedVaults,
 }
 
 impl AppState {
@@ -402,6 +408,129 @@ pub fn policy_params(
             "header": SERVER_PASS_HEADER,
             "message": "the header must be percent-encoded UTF-8"
         }))),
+    }
+}
+
+/// Streams the rest of `file` (`remain_len` of its `file_len` bytes) as the
+/// response body, holding `guard` meanwhile. `label` names the request in the
+/// log line of a timed-out download.
+///
+/// The guard (a read lock) blocks saves, so a client that reads slowly or
+/// stops reading must not keep it: a task owns the guard and the file and
+/// hands chunks to the response through a one-chunk channel, and gives up
+/// (releasing the guard) at the deadline even if the response stream is never
+/// polled again.
+pub fn streaming_download<G: Send + 'static>(
+    guard: G,
+    mut file: tokio::fs::File,
+    file_len: u64,
+    remain_len: u64,
+    last_modified: header::HttpDate,
+    etag: header::EntityTag,
+    label: String,
+) -> HttpResponse {
+    let deadline = Instant::now() + download_timeout(file_len);
+    let (tx, mut rx) = mpsc::channel::<std::io::Result<web::Bytes>>(1);
+    tokio::spawn(async move {
+        let _guard = guard;
+        let mut buf = [0u8; 4096];
+        loop {
+            let chunk = match file.read(&mut buf).await {
+                Ok(0) => return,
+                Ok(len) => Ok(web::Bytes::copy_from_slice(&buf[..len])),
+                Err(e) => Err(e),
+            };
+            let failed = chunk.is_err();
+            // stops on timeout, on a read error, or when the client has gone
+            match timeout_at(deadline, tx.send(chunk)).await {
+                Ok(Ok(())) if !failed => {}
+                _ => return,
+            }
+        }
+    });
+
+    HttpResponse::Ok()
+        .content_type("application/octet-stream")
+        .insert_header(header::CacheControl(vec![header::CacheDirective::NoCache]))
+        .insert_header(header::LastModified(last_modified))
+        .insert_header(header::ETag(etag))
+        .no_chunking(remain_len)
+        .streaming(async_stream::stream! {
+            let mut sent = 0u64;
+            while let Some(chunk) = rx.recv().await {
+                let chunk: Result<web::Bytes, actix_web::Error> = chunk.map_err(Into::into);
+                if let Ok(c) = &chunk {
+                    sent += c.len() as u64;
+                }
+                yield chunk;
+            }
+            // the reader stopped before the end (it timed out): fail the
+            // response rather than end it cleanly with a truncated vault
+            if sent < remain_len {
+                eprintln!("{label} timed out\n  sent={sent} of {remain_len}");
+                let e: actix_web::Error = std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "vault download timed out",
+                )
+                .into();
+                yield Err(e);
+            }
+        })
+}
+
+/// Downloads get at least `DOWNLOAD_MIN_TIMEOUT`, or long enough to finish at
+/// `DOWNLOAD_MIN_RATE` bytes per second if that takes longer.
+const DOWNLOAD_MIN_TIMEOUT: Duration = Duration::from_secs(5);
+const DOWNLOAD_MIN_RATE: u64 = 128 * 1024;
+
+fn download_timeout(len: u64) -> Duration {
+    Duration::from_millis(len.saturating_mul(1000) / DOWNLOAD_MIN_RATE).max(DOWNLOAD_MIN_TIMEOUT)
+}
+
+/// Writes the request body to `wf`, checking it against the Content-Length
+/// (when given rather than chunked) and the policy's size limit.
+pub async fn write_payload(
+    wf: &mut WritingFile,
+    payload: &mut web::Payload,
+    content_length: Option<u64>,
+    len_checker: &mut LenAccumChecker,
+) -> Result<(), HttpResponse> {
+    if let Some(total_len) = content_length {
+        len_checker.check_len(total_len).await?;
+    }
+    let mut accum_total_len = 0u64;
+    while let Some(res) = payload.next().await {
+        let chunk = match res {
+            Ok(chunk) => chunk,
+            Err(e) => {
+                eprintln!("Error occured attempting to read payload\n  e={e:?}");
+                return Err(HttpResponse::BadRequest().json(json!({
+                    "type": "E_PAYLOAD_ERR",
+                    "message": "Failed to read request payload"
+                })));
+            }
+        };
+        accum_total_len += chunk.len() as u64;
+        match content_length {
+            Some(total_len) if accum_total_len > total_len => {
+                return Err(HttpResponse::BadRequest().json(json!({
+                    "type": "E_PAYLOAD_TOO_LARGE",
+                    "message": "request payload is larger than specified Content-Length"
+                })));
+            }
+            Some(_) => {}
+            None => len_checker.check_len(accum_total_len).await?,
+        }
+        wf.write_chunk(&chunk).await?;
+    }
+    match content_length {
+        Some(total_len) if accum_total_len != total_len => {
+            Err(HttpResponse::BadRequest().json(json!({
+                "type": "E_PAYLOAD_TOO_SMALL",
+                "message": "request payload is smaller than specified Content-Length"
+            })))
+        }
+        _ => Ok(()),
     }
 }
 
@@ -734,7 +863,7 @@ pub struct Replaced {
 
 #[cfg(test)]
 mod tests {
-    use super::{finish_write, parse_b64, parse_b64_digit, vault_version};
+    use super::{download_timeout, finish_write, parse_b64, parse_b64_digit, vault_version};
     use std::time::{Duration, SystemTime};
     use tokio::io::AsyncWriteExt;
 
@@ -761,6 +890,14 @@ mod tests {
                 vault_version(&written).unwrap().1
             );
         }
+    }
+
+    #[test]
+    fn download_timeout_is_at_least_5s_or_128kib_per_s() {
+        assert_eq!(download_timeout(0), Duration::from_secs(5));
+        assert_eq!(download_timeout(5 * 128 * 1024), Duration::from_secs(5));
+        assert_eq!(download_timeout(10 * 128 * 1024), Duration::from_secs(10));
+        assert_eq!(download_timeout(64 * 1024 * 1024), Duration::from_secs(512));
     }
 
     /// Every character in the standard 64-char base64 alphabet must decode to

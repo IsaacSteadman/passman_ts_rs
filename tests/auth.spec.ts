@@ -76,9 +76,9 @@ test.describe("Login flow", () => {
 
   test("password generator section visible after login", async ({ page }) => {
     await login(page);
-    await expect(page.locator(".pm-section-label")).toContainText(
-      "Password Generator",
-    );
+    await expect(
+      page.locator(".pm-section-label", { hasText: "Password Generator" }),
+    ).toBeVisible();
     await expect(page.locator("#passgen-panel")).toBeVisible();
   });
 
