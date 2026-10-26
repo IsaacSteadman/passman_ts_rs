@@ -34,6 +34,7 @@ import {
   renderPassTable,
 } from "./PassTable";
 import { encryptBlob } from "./passman_crypto_glue";
+import { serverUrl } from "./serverOrigin";
 
 export interface ContentAreaHandle {
   show(result: LoginResult): void;
@@ -345,7 +346,7 @@ export function initContentArea(
             new TextEncoder().encode(json),
           );
 
-          const url = new URL("/pass-table", window.location.origin);
+          const url = serverUrl("/pass-table");
           url.searchParams.set("username", currentUsername);
           if (currentServerNs != null)
             url.searchParams.set("server_ns", currentServerNs);
@@ -1108,7 +1109,7 @@ export function initContentArea(
     }
 
     const serverPass = currentServerPass;
-    const url = new URL("/pass-table-new-pass", window.location.origin);
+    const url = serverUrl("/pass-table-new-pass");
     url.searchParams.set("username", currentUsername);
     if (currentServerNs != null)
       url.searchParams.set("server_ns", currentServerNs);

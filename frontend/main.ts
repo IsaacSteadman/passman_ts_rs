@@ -14,6 +14,7 @@ import { initSharedVaultsPanel } from "./sharedVaults";
 import { accountId } from "./deviceStore";
 import { prepareForVault } from "./vaultTransfer";
 import { initTheme } from "./theme";
+import { serverUrl } from "./serverOrigin";
 
 initTheme();
 
@@ -182,7 +183,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     );
     const blob = encryptBlob(encryptionKey, emptyTable);
 
-    const url = new URL("/pass-table", window.location.origin);
+    const url = serverUrl("/pass-table");
     url.searchParams.set("username", username);
     if (serverNs != null) url.searchParams.set("server_ns", serverNs);
 

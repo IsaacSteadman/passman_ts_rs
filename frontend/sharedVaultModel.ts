@@ -15,6 +15,7 @@ import { mergeVaults, valuesEqual } from "./merge";
 import type { HistoryEntry, SharingData } from "./PassTable";
 import { fromBase64Url, toBase64Url } from "./passman_crypto_glue";
 import * as sc from "./sharingCrypto";
+import { serverUrl } from "./serverOrigin";
 
 export interface SharingEnv {
   session(): Session | null;
@@ -117,7 +118,7 @@ export class SharingClient {
     const session = this.env.session();
     if (session == null) throw new OfflineError();
     const started = this.generation;
-    const url = new URL(path, window.location.origin);
+    const url = serverUrl(path);
     url.searchParams.set("username", session.username);
     if (session.serverNs != null)
       url.searchParams.set("server_ns", session.serverNs);

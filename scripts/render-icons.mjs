@@ -1,15 +1,14 @@
 // Renders frontend/icons/shield_lock.svg to the PNG sizes the web app
-// manifest and iOS need. The PNGs are committed; rerun this after changing the
+// manifest, iOS and the browser extensions (extension/icons) need. The PNGs are committed; rerun this after changing the
 // SVG: `node scripts/render-icons.mjs`
 import { chromium } from "@playwright/test";
 import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const iconsDir = join(
-  dirname(fileURLToPath(import.meta.url)),
-  "../frontend/icons",
-);
+const root = join(dirname(fileURLToPath(import.meta.url)), "..");
+const iconsDir = join(root, "frontend/icons");
+const extensionIconsDir = join(root, "extension/icons");
 // The SVG's text asks for the generic `sans-serif`, which a minimal font setup
 // may map to a serif font; name a sans font so the PNGs come out the same.
 const svg = (
@@ -24,6 +23,13 @@ const svgUrl = `data:image/svg+xml;base64,${Buffer.from(svg).toString("base64")}
 // to a circle of 80% of the width, and iOS rounds the corners of touch icons,
 // so those get a background and a smaller icon.
 const outputs = [
+  ...[16, 32, 48, 128].map((size) => ({
+    file: `icon-${size}.png`,
+    dir: extensionIconsDir,
+    size,
+    scale: 1,
+    background: null,
+  })),
   { file: "icon-32.png", size: 32, scale: 1, background: null },
   { file: "icon-192.png", size: 192, scale: 1, background: null },
   { file: "icon-512.png", size: 512, scale: 1, background: null },
@@ -43,7 +49,7 @@ const outputs = [
 
 const browser = await chromium.launch();
 try {
-  for (const { file, size, scale, background } of outputs) {
+  for (const { file, dir = iconsDir, size, scale, background } of outputs) {
     const page = await browser.newPage({
       viewport: { width: size, height: size },
     });
@@ -54,7 +60,7 @@ try {
       </body>`);
     await page.locator("img").evaluate((img) => img.decode());
     await page.screenshot({
-      path: join(iconsDir, file),
+      path: join(dir, file),
       omitBackground: background == null,
     });
     await page.close();

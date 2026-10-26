@@ -8,3 +8,4 @@ test-results
 config.json
 policies.json
 .patched-crates
+dist-extension

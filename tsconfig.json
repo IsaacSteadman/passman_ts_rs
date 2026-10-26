@@ -22,6 +22,6 @@
       "@/*": ["./frontend/*"]
     }
   },
-  "include": ["frontend/**/*"],
+  "include": ["frontend/**/*", "extension/**/*"],
   "exclude": ["node_modules", "target", "src", "frontend/sw.ts"]
 }

@@ -5,6 +5,7 @@ import {
   type CachedVault,
 } from "./deviceStore";
 import { decryptBlob, deriveKey, SALT_LEN } from "./passman_crypto_glue";
+import { serverUrl } from "./serverOrigin";
 import {
   type CellValue,
   type PassTableColumn,
@@ -175,7 +176,7 @@ export async function downloadVault(
   serverPass: string,
   authKeyB64: string,
 ): Promise<Download> {
-  const url = new URL("/pass-table", window.location.origin);
+  const url = serverUrl("/pass-table");
   url.searchParams.set("username", username);
   if (serverNs != null) url.searchParams.set("server_ns", serverNs);
   try {

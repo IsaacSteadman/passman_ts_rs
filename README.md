@@ -14,6 +14,38 @@ It downloads the published crate, verifies its SHA-256, applies the patch and
 writes the result to `.patched-crates/` (gitignored), where
 `[patch.crates-io]` in `Cargo.toml` points.
 
+## Browser extensions
+
+`extension/` holds extensions for Chromium browsers (Chrome, Edge, Brave, …),
+Firefox and Safari. `npm run build:extension` builds them into
+`dist-extension/`: `chromium/` and `firefox/` (also zipped, for the Chrome Web
+Store and addons.mozilla.org) and `safari/`, which `scripts/package-safari.sh`
+wraps in the Xcode project Safari needs (on a Mac). To try one, load the
+folder unpacked: `chrome://extensions` → Developer mode → Load unpacked, or
+`about:debugging` → This Firefox → Load Temporary Add-on (pick
+`manifest.json`).
+
+The popup unlocks the account on the user's Passman server (asking for
+permission to reach that server), then:
+
+- lists the logins for the current tab's site (a row with a link to that
+  site, or a subdomain of it, and a username, password or MFA key), from the
+  user's own vault and from shared vaults, which it checks as the web app
+  does (and marks when a manager isn't verified);
+- fills them into the page, only on their own site and never from an https
+  login into an http page, and fills or copies MFA codes;
+- finds any login by searching (copying only: filling elsewhere could hand a
+  password to a lookalike site);
+- saves what was typed on the page, or a generated password, as a new login
+  in the user's own vault, or as the new password of the saved login with
+  that username.
+
+The page is only touched when the user opens the popup on it (`activeTab`),
+so the extension doesn't need access to every site. The unlocked session is
+kept in the browser's session storage (in memory) until the browser closes,
+the computer is locked, or it goes unused for the time chosen in the popup
+(15 minutes unless changed). Open the popup with Alt+Shift+P.
+
 ## Shared vaults
 
 Users can share vaults with each other. The server only stores ciphertext and

@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Passman</title>
+    <link rel="stylesheet" href="popup.less" />
+  </head>
+  <body>
+    <main id="locked" hidden>
+      <h1>Passman</h1>
+      <form name="unlock">
+        <label>
+          Server
+          <input
+            name="server"
+            type="url"
+            placeholder="https://passman.example.com"
+            required
+          />
+        </label>
+        <label>
+          Username
+          <input name="username" autocomplete="username" required />
+        </label>
+        <label>
+          Password
+          <input
+            name="password"
+            type="password"
+            autocomplete="current-password"
+            required
+          />
+        </label>
+        <details>
+          <summary>Server access</summary>
+          <label>
+            Server password
+            <input name="server_pass" type="password" autocomplete="off" />
+          </label>
+          <label>
+            Namespace
+            <input name="server_ns" autocomplete="off" />
+          </label>
+        </details>
+        <button type="submit" class="pm-btn pm-btn-primary">Unlock</button>
+      </form>
+    </main>
+
+    <main id="unlocked" hidden>
+      <header>
+        <span name="site"></span>
+        <button type="button" name="lock" class="pm-btn pm-btn-ghost">
+          Lock
+        </button>
+      </header>
+      <input
+        name="search"
+        type="search"
+        placeholder="Search all logins"
+        aria-label="Search all logins"
+      />
+      <h2 name="list-title"></h2>
+      <ul name="logins"></ul>
+
+      <details name="save">
+        <summary>Save a login for this site</summary>
+        <form name="save-login">
+          <button type="button" name="read-page" class="pm-btn pm-btn-ghost">
+            Use what's typed on the page
+          </button>
+          <label>
+            Username
+            <input name="save-username" autocomplete="off" />
+          </label>
+          <label>
+            Password
+            <span class="ext-row">
+              <input
+                name="save-password"
+                type="password"
+                autocomplete="off"
+                required
+              />
+              <button
+                type="button"
+                name="show-password"
+                class="pm-btn pm-btn-ghost"
+              >
+                Show
+              </button>
+            </span>
+          </label>
+          <span class="ext-row">
+            <button type="button" name="generate" class="pm-btn pm-btn-ghost">
+              Generate
+            </button>
+            <button
+              type="button"
+              name="fill-generated"
+              class="pm-btn pm-btn-ghost"
+            >
+              Fill into page
+            </button>
+          </span>
+          <label>
+            Table
+            <select name="save-table"></select>
+          </label>
+          <button type="submit" name="save" class="pm-btn pm-btn-primary">
+            Save
+          </button>
+        </form>
+      </details>
+
+      <footer>
+        <label>
+          Lock after
+          <select name="lock-minutes">
+            <option value="5">5 minutes</option>
+            <option value="15">15 minutes</option>
+            <option value="60">1 hour</option>
+            <option value="240">4 hours</option>
+            <option value="0">the browser closes</option>
+          </select>
+        </label>
+        <a name="open-app" target="_blank" rel="noopener">Open Passman</a>
+      </footer>
+    </main>
+
+    <p id="status" role="status"></p>
+    <script type="module" src="popup.ts"></script>
+  </body>
+</html>
