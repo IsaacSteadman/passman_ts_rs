@@ -482,21 +482,29 @@ mod tests {
 
     // ── Shared vaults ────────────────────────────────────────────────────────
 
-    /// A user registered on the test app, with the credentials to act as them.
+    use passman_crypto::sharing::{self, Member, RecordBody, VersionBody};
+    use serde_json::json;
+
+    /// A user registered on the test app with a published sharing identity.
     struct TestUser {
         name: &'static str,
         auth_key: String,
         /// `None` for the server access password, else this policy's
         /// namespace (whose password is "pw").
         server_ns: Option<&'static str>,
+        secret: [u8; 32],
+        bundle: Vec<u8>,
     }
 
     impl TestUser {
         fn new(name: &'static str, server_ns: Option<&'static str>) -> Self {
+            let secret = sharing::generate_identity_secret();
             Self {
                 name,
                 auth_key: derive_client_auth_key(name, "pw"),
                 server_ns,
+                bundle: sharing::identity_bundle(&secret).unwrap(),
+                secret,
             }
         }
 
@@ -515,11 +523,77 @@ mod tests {
                 .insert_header((routes::base::AUTH_KEY_HEADER, self.auth_key.as_str()))
                 .insert_header((routes::base::SERVER_PASS_HEADER, server_pass))
         }
+
+        fn member(&self, write: bool, manage: bool) -> Member {
+            Member {
+                username: self.name.to_string(),
+                fingerprint: sharing::b64_encode(&sharing::fingerprint(&self.bundle)),
+                write,
+                manage,
+            }
+        }
     }
 
-    /// Base64 of `len` copies of `byte`, standing in for keys and ciphertext.
-    fn fake_b64(byte: u8, len: usize) -> String {
-        b64url_encode(&vec![byte; len])
+    const VAULT_ID: &str = "0123456789abcdef0123456789abcdef";
+
+    /// A signed record of `members` following `prev`.
+    fn make_record(
+        prev: Option<&[u8]>,
+        author: &TestUser,
+        members: &[(&TestUser, bool, bool)],
+    ) -> Vec<u8> {
+        let seq = prev.map_or(0, |p| sharing::parse_record(p).unwrap().seq + 1);
+        let epoch_secret = sharing::generate_epoch_secret();
+        let body = RecordBody {
+            v: 1,
+            vault_id: VAULT_ID.to_string(),
+            seq,
+            prev: prev.map(sharing::record_hash),
+            author: author.name.to_string(),
+            time: 0,
+            members: members.iter().map(|(u, w, m)| u.member(*w, *m)).collect(),
+            keys: members
+                .iter()
+                .map(|(u, ..)| {
+                    let ctx = sharing::epoch_key_context(VAULT_ID, seq, u.name);
+                    let wrapped = sharing::wrap_key(&u.bundle, &epoch_secret, &ctx).unwrap();
+                    (u.name.to_string(), sharing::b64_encode(&wrapped))
+                })
+                .collect(),
+        };
+        sharing::sign_record(&author.secret, &body).unwrap()
+    }
+
+    /// A signed version whose (stand-in) ciphertexts are `len` bytes.
+    fn make_version(
+        author: &TestUser,
+        epoch: u64,
+        version: u64,
+        rekey: bool,
+        len: usize,
+    ) -> Vec<u8> {
+        let tables = vec![7u8; len];
+        let history = b"history".to_vec();
+        let hash = |d: &[u8]| {
+            use sha2::Digest;
+            sharing::b64_encode(&sha2::Sha256::digest(d))
+        };
+        let body = VersionBody {
+            v: 1,
+            vault_id: VAULT_ID.to_string(),
+            epoch,
+            version,
+            author: author.name.to_string(),
+            time: 0,
+            tables_hash: hash(&tables),
+            history_hash: hash(&history),
+            rekey,
+        };
+        sharing::sign_version(&author.secret, &body, &tables, &history).unwrap()
+    }
+
+    fn frames(parts: &[&[u8]]) -> Vec<u8> {
+        sharing::encode_frames(parts)
     }
 
     macro_rules! call {
@@ -530,7 +604,7 @@ mod tests {
         }};
     }
 
-    /// Calls and returns the status and JSON body.
+    /// Calls and returns the status and the JSON body (`null` if none).
     macro_rules! call_json {
         ($app:expr, $req:expr) => {{
             let resp = call!($app, $req);
@@ -541,205 +615,342 @@ mod tests {
         }};
     }
 
-    /// Registers the users and publishes a sharing key for each (their key
-    /// is 32 copies of their index + 1).
+    /// Registers the users and publishes their identities.
     macro_rules! setup_users {
         ($app:expr, $($user:expr),+) => {{
-            for (i, user) in [$(&$user),+].into_iter().enumerate() {
+            for user in [$(&$user),+] {
                 let req = user
                     .req(test::TestRequest::post(), "/pass-table")
                     .insert_header(("Content-Length", "64"))
                     .set_payload(vec![0u8; 64]);
                 assert_eq!(call!($app, req).status().as_u16(), 201);
                 let req = user
-                    .req(test::TestRequest::put(), "/sharing-key")
-                    .set_json(json!({ "publicKey": fake_b64(i as u8 + 1, 32) }));
+                    .req(test::TestRequest::put(), "/identity")
+                    .set_json(json!({ "bundle": sharing::b64_encode(&user.bundle) }));
                 assert_eq!(call!($app, req).status().as_u16(), 200);
             }
         }};
     }
 
-    macro_rules! create_vault {
-        ($app:expr, $user:expr, $key_byte:expr) => {{
-            let req = $user
-                .req(test::TestRequest::post(), "/shared-vaults")
-                .set_json(json!({
-                    "encryptedName": fake_b64(9, 40),
-                    "wrappedKey": fake_b64(7, 80),
-                    "publicKey": fake_b64($key_byte, 32),
-                }));
+    macro_rules! post_frames {
+        ($app:expr, $user:expr, $path:expr, $body:expr, $etag:expr) => {{
+            let body: Vec<u8> = $body;
+            let mut req = $user
+                .req(test::TestRequest::post(), $path)
+                .insert_header(("Content-Length", body.len().to_string()))
+                .set_payload(body);
+            let etag: Option<&str> = $etag;
+            if let Some(etag) = etag {
+                req = req.insert_header(("If-Match", etag));
+            }
             call_json!($app, req)
         }};
     }
 
-    use serde_json::json;
+    macro_rules! put_version {
+        ($app:expr, $user:expr, $version:expr, $etag:expr) => {{
+            let body: Vec<u8> = $version;
+            let req = $user
+                .req(
+                    test::TestRequest::put(),
+                    &format!("/shared-vaults/{VAULT_ID}/version"),
+                )
+                .insert_header(("If-Match", $etag))
+                .insert_header(("Content-Length", body.len().to_string()))
+                .set_payload(body);
+            call_json!($app, req)
+        }};
+    }
 
-    /// Owners add members, members read and save, and non-members can't tell
-    /// the vault exists.
+    const ETAG_0_1: &str = "\"0-1\"";
+
+    /// Managers change the member list, writers save, and everyone sees only
+    /// the epochs they were in.
     #[actix_web::test]
-    async fn shared_vault_membership() {
+    async fn shared_vault_lifecycle() {
         let tmpdir = tempfile::tempdir().unwrap();
         let state = make_test_app(tmpdir.path()).await;
         let app = init_app!(state);
         let alice = TestUser::new("alice", None);
         let bob = TestUser::new("bob", None);
-        setup_users!(app, alice, bob);
+        let carol = TestUser::new("carol", None);
+        setup_users!(app, alice, bob, carol);
+        let vault = format!("/shared-vaults/{VAULT_ID}");
 
-        let (status, body) = create_vault!(app, alice, 1);
+        let r0 = make_record(None, &alice, &[(&alice, true, true)]);
+        // a record claiming another author is refused
+        let (status, body) = post_frames!(
+            app,
+            bob,
+            "/shared-vaults",
+            frames(&[&r0, &make_version(&alice, 0, 1, false, 10)]),
+            None
+        );
+        assert_eq!((status, body["type"].as_str()), (400, Some("E_INVALID")));
+        let (status, _) = post_frames!(
+            app,
+            alice,
+            "/shared-vaults",
+            frames(&[&r0, &make_version(&alice, 0, 1, false, 10)]),
+            None
+        );
         assert_eq!(status, 201);
-        let id = body["id"].as_str().unwrap().to_string();
-        let data = format!("/shared-vaults/{id}/data");
 
-        let (_, list) = call_json!(app, alice.req(test::TestRequest::get(), "/shared-vaults"));
-        assert_eq!(list["vaults"][0]["id"], id.as_str());
-        assert_eq!(list["vaults"][0]["role"], "Owner");
-        assert_eq!(list["vaults"][0]["size"], 0);
         let (_, list) = call_json!(app, bob.req(test::TestRequest::get(), "/shared-vaults"));
         assert_eq!(list["vaults"], json!([]));
-        let resp = call!(app, bob.req(test::TestRequest::get(), &data));
+        let resp = call!(
+            app,
+            bob.req(test::TestRequest::get(), &format!("{vault}/version"))
+        );
         assert_eq!(resp.status().as_u16(), 404);
 
-        // the member's sharing key must be the one the vault key was sealed to
-        let member = format!("/shared-vaults/{id}/members/bob");
-        let add = |public_key: String| {
-            alice
-                .req(test::TestRequest::put(), &member)
-                .set_json(json!({
-                    "role": "Editor",
-                    "wrappedKey": fake_b64(8, 80),
-                    "publicKey": public_key,
-                }))
-        };
-        let (status, body) = call_json!(app, add(fake_b64(1, 32)));
-        assert_eq!(
-            (status, body["type"].as_str()),
-            (409, Some("E_SHARING_KEY_CHANGED"))
+        // alice adds bob (who can write) and carol (who can only read)
+        let r1 = make_record(
+            Some(&r0),
+            &alice,
+            &[
+                (&alice, true, true),
+                (&bob, true, false),
+                (&carol, false, false),
+            ],
         );
-        assert_eq!(call!(app, add(fake_b64(2, 32))).status().as_u16(), 200);
+        let (status, _) = post_frames!(
+            app,
+            alice,
+            &format!("{vault}/records"),
+            frames(&[&r1, &make_version(&alice, 1, 2, true, 10)]),
+            Some(ETAG_0_1)
+        );
+        assert_eq!(status, 200);
 
         let (_, list) = call_json!(app, bob.req(test::TestRequest::get(), "/shared-vaults"));
-        assert_eq!(list["vaults"][0]["role"], "Editor");
-        assert_eq!(list["vaults"][0]["wrappedKey"], fake_b64(8, 80));
-        assert_eq!(list["vaults"][0]["members"].as_array().unwrap().len(), 2);
+        assert_eq!(list["vaults"][0]["seq"], 1);
+        assert_eq!(list["vaults"][0]["etag"], "\"1-2\"");
+        assert_eq!(list["vaults"][0]["archives"], json!([0]));
+        let (_, records) = call_json!(
+            app,
+            bob.req(test::TestRequest::get(), &format!("{vault}/records"))
+        );
+        assert_eq!(records["records"].as_array().unwrap().len(), 2);
 
-        // bob saves, alice reads it back
-        let resp = call!(app, bob.req(test::TestRequest::get(), &data));
-        let etag = resp.headers().get("ETag").unwrap().clone();
-        assert!(test::read_body(resp).await.is_empty());
-        let req = bob
-            .req(test::TestRequest::put(), &data)
-            .insert_header(("If-Match", etag.clone()))
-            .insert_header(("Content-Length", "5"))
-            .set_payload(b"hello".to_vec());
-        assert_eq!(call!(app, req).status().as_u16(), 200);
-        let resp = call!(app, alice.req(test::TestRequest::get(), &data));
-        assert_eq!(test::read_body(resp).await, b"hello".to_vec());
-        // a save based on the old version is refused
-        let req = alice
-            .req(test::TestRequest::put(), &data)
-            .insert_header(("If-Match", etag))
-            .insert_header(("Content-Length", "3"))
-            .set_payload(b"old".to_vec());
-        assert_eq!(call!(app, req).status().as_u16(), 412);
-
-        // only owners manage the vault
-        let resp = call!(
-            app,
-            bob.req(test::TestRequest::delete(), &format!("/shared-vaults/{id}"))
-        );
-        assert_eq!(resp.status().as_u16(), 403);
-        let resp = call!(
-            app,
-            bob.req(
-                test::TestRequest::delete(),
-                &format!("/shared-vaults/{id}/members/alice")
-            )
-        );
-        assert_eq!(resp.status().as_u16(), 403);
-        // and the last owner can't leave
-        let (status, body) = call_json!(
-            app,
-            alice.req(
-                test::TestRequest::delete(),
-                &format!("/shared-vaults/{id}/members/alice")
-            )
-        );
-        assert_eq!((status, body["type"].as_str()), (409, Some("E_LAST_OWNER")));
-        let (status, body) = call_json!(
-            app,
-            alice
-                .req(
-                    test::TestRequest::put(),
-                    &format!("/shared-vaults/{id}/members/alice")
-                )
-                .set_json(json!({ "role": "Editor" }))
-        );
-        assert_eq!((status, body["type"].as_str()), (409, Some("E_LAST_OWNER")));
-
-        // a removed member loses access
+        // bob saves; carol can't, nor can a version of the old epoch be saved
+        let (status, _) = put_version!(app, bob, make_version(&bob, 1, 3, false, 20), "\"1-2\"");
+        assert_eq!(status, 200);
+        let (status, _) =
+            put_version!(app, carol, make_version(&carol, 1, 4, false, 20), "\"1-3\"");
+        assert_eq!(status, 403);
+        let (status, body) =
+            put_version!(app, alice, make_version(&alice, 0, 4, false, 20), "\"1-3\"");
         assert_eq!(
-            call!(app, alice.req(test::TestRequest::delete(), &member))
-                .status()
-                .as_u16(),
-            200
+            (status, body["type"].as_str()),
+            (409, Some("E_EPOCH_CHANGED"))
         );
-        let resp = call!(app, bob.req(test::TestRequest::get(), &data));
-        assert_eq!(resp.status().as_u16(), 404);
-
-        // deleting removes the files; the vault survives a restart until then
-        let state2 = make_test_app_with_policies(tmpdir.path(), "{}").await;
-        assert!(state2.shared_vaults.vaults.read().await.contains_key(&id));
+        // a stale ETag is refused
+        let (status, _) = put_version!(app, bob, make_version(&bob, 1, 4, false, 20), "\"1-2\"");
+        assert_eq!(status, 412);
         let resp = call!(
             app,
-            alice.req(test::TestRequest::delete(), &format!("/shared-vaults/{id}"))
+            carol.req(test::TestRequest::get(), &format!("{vault}/version"))
         );
+        assert_eq!(resp.headers().get("ETag").unwrap(), "\"1-3\"");
+        let version = test::read_body(resp).await;
+        let record = sharing::parse_record(&r1).unwrap();
+        assert_eq!(
+            sharing::verify_version(&record, &version, &bob.bundle)
+                .unwrap()
+                .version,
+            3
+        );
+
+        // only members of epoch 0 can read its history
+        let archive0 = format!("{vault}/archive/0");
+        let resp = call!(app, bob.req(test::TestRequest::get(), &archive0));
+        assert_eq!(resp.status().as_u16(), 404);
+        let resp = call!(app, alice.req(test::TestRequest::get(), &archive0));
+        let archive = test::read_body(resp).await;
+        sharing::verify_archive(
+            &sharing::parse_record(&r0).unwrap(),
+            &archive,
+            &alice.bundle,
+        )
+        .unwrap();
+
+        // bob can't manage members
+        let r2 = make_record(Some(&r1), &bob, &[(&alice, true, true), (&bob, true, true)]);
+        let (status, _) = post_frames!(
+            app,
+            bob,
+            &format!("{vault}/records"),
+            frames(&[&r2, &make_version(&bob, 2, 4, true, 10)]),
+            Some("\"1-3\"")
+        );
+        assert_eq!(status, 400);
+
+        // carol leaves: she loses access at once, and the next record must
+        // remove her
+        let resp = call!(
+            app,
+            carol.req(test::TestRequest::post(), &format!("{vault}/leave"))
+        );
+        assert_eq!(resp.status().as_u16(), 200);
+        let resp = call!(
+            app,
+            carol.req(test::TestRequest::get(), &format!("{vault}/version"))
+        );
+        assert_eq!(resp.status().as_u16(), 404);
+        let (_, list) = call_json!(app, alice.req(test::TestRequest::get(), "/shared-vaults"));
+        assert_eq!(list["vaults"][0]["leaving"], json!(["carol"]));
+        let r2 = make_record(
+            Some(&r1),
+            &alice,
+            &[
+                (&alice, true, true),
+                (&bob, true, false),
+                (&carol, false, false),
+            ],
+        );
+        let (status, body) = post_frames!(
+            app,
+            alice,
+            &format!("{vault}/records"),
+            frames(&[&r2, &make_version(&alice, 2, 4, true, 10)]),
+            Some("\"1-3\"")
+        );
+        assert_eq!(
+            (status, body["type"].as_str()),
+            (409, Some("E_MEMBER_LEAVING"))
+        );
+        let r2 = make_record(
+            Some(&r1),
+            &alice,
+            &[(&alice, true, true), (&bob, true, false)],
+        );
+        let (status, _) = post_frames!(
+            app,
+            alice,
+            &format!("{vault}/records"),
+            frames(&[&r2, &make_version(&alice, 2, 4, true, 10)]),
+            Some("\"1-3\"")
+        );
+        assert_eq!(status, 200);
+
+        // the last manager can't leave, and only managers can delete
+        let (status, body) = call_json!(
+            app,
+            alice.req(test::TestRequest::post(), &format!("{vault}/leave"))
+        );
+        assert_eq!(
+            (status, body["type"].as_str()),
+            (409, Some("E_LAST_MANAGER"))
+        );
+        let resp = call!(app, bob.req(test::TestRequest::delete(), &vault));
+        assert_eq!(resp.status().as_u16(), 403);
+
+        // the vault survives a restart, and deleting it removes its files
+        let state2 = make_test_app(tmpdir.path()).await;
+        {
+            let vaults = state2.shared_vaults.vaults.read().await;
+            let reloaded = vaults[VAULT_ID].read().await;
+            assert_eq!((reloaded.record.seq, reloaded.version.version), (2, 4));
+            assert_eq!(
+                reloaded.archives.keys().copied().collect::<Vec<_>>(),
+                [0, 1]
+            );
+        }
+        let resp = call!(app, alice.req(test::TestRequest::delete(), &vault));
         assert_eq!(resp.status().as_u16(), 200);
         let vaults_dir = tmpdir.path().join("server_data/.shared/vaults");
         assert_eq!(std::fs::read_dir(vaults_dir).unwrap().count(), 0);
     }
 
-    /// A sharing key can be replaced until vault keys have been sealed to it.
+    /// An identity can be replaced until a vault pins its fingerprint, and a
+    /// member must be added with their current identity.
     #[actix_web::test]
-    async fn sharing_key_is_fixed_once_in_use() {
+    async fn identities_are_pinned_by_vaults() {
         let tmpdir = tempfile::tempdir().unwrap();
         let state = make_test_app(tmpdir.path()).await;
         let app = init_app!(state);
         let alice = TestUser::new("alice", None);
-        setup_users!(app, alice);
-        let put_key = |byte: u8| {
-            alice
-                .req(test::TestRequest::put(), "/sharing-key")
-                .set_json(json!({ "publicKey": fake_b64(byte, 32) }))
+        let mut bob = TestUser::new("bob", None);
+        setup_users!(app, alice, bob);
+
+        // bob replaces his identity; a record with the old one is refused
+        let old_bob = TestUser::new("bob", None);
+        let old_bob = TestUser {
+            secret: bob.secret,
+            bundle: bob.bundle.clone(),
+            ..old_bob
         };
-        assert_eq!(call!(app, put_key(5)).status().as_u16(), 200);
-        let (status, _) = create_vault!(app, alice, 5);
-        assert_eq!(status, 201);
-        let (status, body) = call_json!(app, put_key(6));
+        bob.secret = sharing::generate_identity_secret();
+        bob.bundle = sharing::identity_bundle(&bob.secret).unwrap();
+        let req = bob
+            .req(test::TestRequest::put(), "/identity")
+            .set_json(json!({ "bundle": sharing::b64_encode(&bob.bundle) }));
+        assert_eq!(call!(app, req).status().as_u16(), 200);
+        let r0 = make_record(
+            None,
+            &alice,
+            &[(&alice, true, true), (&old_bob, true, false)],
+        );
+        let (status, body) = post_frames!(
+            app,
+            alice,
+            "/shared-vaults",
+            frames(&[&r0, &make_version(&alice, 0, 1, false, 10)]),
+            None
+        );
         assert_eq!(
             (status, body["type"].as_str()),
-            (409, Some("E_SHARING_KEY_IN_USE"))
+            (409, Some("E_IDENTITY_CHANGED"))
         );
-        // publishing the same key again is fine
-        assert_eq!(call!(app, put_key(5)).status().as_u16(), 200);
-        // keys must be 32 bytes
-        let req = alice
-            .req(test::TestRequest::put(), "/sharing-key")
-            .set_json(json!({ "publicKey": fake_b64(5, 31) }));
-        assert_eq!(call!(app, req).status().as_u16(), 400);
+
+        let r0 = make_record(None, &alice, &[(&alice, true, true), (&bob, true, false)]);
+        let (status, _) = post_frames!(
+            app,
+            alice,
+            "/shared-vaults",
+            frames(&[&r0, &make_version(&alice, 0, 1, false, 10)]),
+            None
+        );
+        assert_eq!(status, 201);
+        // now bob's identity is in use
+        let req = bob
+            .req(test::TestRequest::put(), "/identity")
+            .set_json(json!({ "bundle": sharing::b64_encode(&old_bob.bundle) }));
+        let (status, body) = call_json!(app, req);
+        assert_eq!(
+            (status, body["type"].as_str()),
+            (409, Some("E_IDENTITY_IN_USE"))
+        );
 
         let (status, body) = call_json!(
             app,
-            alice.req(test::TestRequest::get(), "/sharing-key?user=nobody")
+            alice.req(test::TestRequest::get(), "/identity?user=nobody")
         );
         assert_eq!(
             (status, body["type"].as_str()),
-            (404, Some("E_NO_SHARING_KEY"))
+            (404, Some("E_NO_IDENTITY"))
         );
-        let (status, body) = call_json!(app, alice.req(test::TestRequest::get(), "/sharing-key"));
-        assert_eq!(
-            (status, body["publicKey"].clone()),
-            (200, json!(fake_b64(5, 32)))
+        let (status, body) = call_json!(
+            app,
+            alice.req(test::TestRequest::get(), "/identity?user=bob")
         );
+        assert_eq!(status, 200);
+        assert_eq!(body["bundle"], sharing::b64_encode(&bob.bundle));
+        // bob's replaced identity can still be found by its fingerprint
+        let hex: String = sharing::fingerprint(&old_bob.bundle)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        let (status, body) = call_json!(
+            app,
+            alice.req(
+                test::TestRequest::get(),
+                &format!("/identity?fingerprint={hex}")
+            )
+        );
+        assert_eq!(status, 200);
+        assert_eq!(body["bundle"], sharing::b64_encode(&old_bob.bundle));
     }
 
     /// A limited policy caps how many shared vaults are created under it, and
@@ -750,9 +961,9 @@ mod tests {
         let state = make_test_app_with_policies(
             tmpdir.path(),
             r#"{
-                "team": {"Password":"pw","PolicyType":"LIMITED_POLICY","MaxAccounts":3,"NumAccounts":0,"MaxDataSize":1000,
-                         "MaxSharedVaults":1,"MaxSharedVaultDataSize":10,"MaxSharedVaultMembers":2},
-                "old": {"Password":"pw","PolicyType":"LIMITED_POLICY","MaxAccounts":3,"NumAccounts":0,"MaxDataSize":1000}
+                "team": {"Password":"pw","PolicyType":"LIMITED_POLICY","MaxAccounts":4,"NumAccounts":0,"MaxDataSize":100000,
+                         "MaxSharedVaults":1,"MaxSharedVaultDataSize":20000,"MaxSharedVaultMembers":2},
+                "old": {"Password":"pw","PolicyType":"LIMITED_POLICY","MaxAccounts":4,"NumAccounts":0,"MaxDataSize":100000}
             }"#,
         )
         .await;
@@ -762,85 +973,122 @@ mod tests {
         let carol = TestUser::new("carol", Some("team"));
         let dave = TestUser::new("dave", Some("old"));
         setup_users!(app, alice, bob, carol, dave);
+        let r0 = make_record(None, &alice, &[(&alice, true, true)]);
+        let create = |user: &TestUser, record: &[u8], len: usize| {
+            let body = frames(&[record, &make_version(user, 0, 1, false, len)]);
+            user.req(test::TestRequest::post(), "/shared-vaults")
+                .insert_header(("Content-Length", body.len().to_string()))
+                .set_payload(body)
+        };
 
         // policies without the shared vault fields don't allow any
-        let (status, body) = create_vault!(app, dave, 4);
+        let d0 = make_record(None, &dave, &[(&dave, true, true)]);
+        let (status, body) = call_json!(app, create(&dave, &d0, 10));
         assert_eq!((status, body["type"].as_str()), (400, Some("E_POLICY")));
-
-        let (status, body) = create_vault!(app, alice, 1);
+        // the vault's own size limit applies, not the account one
+        let (status, body) = call_json!(app, create(&alice, &r0, 30000));
+        assert_eq!((status, body["type"].as_str()), (400, Some("E_POLICY")));
+        let (status, _) = call_json!(app, create(&alice, &r0, 10));
         assert_eq!(status, 201);
-        let id = body["id"].as_str().unwrap().to_string();
-        let (status, body) = create_vault!(app, bob, 2);
+        // only one vault under this policy (the failed attempts gave theirs back)
+        let b0 = make_record(None, &bob, &[(&bob, true, true)]);
+        let (status, body) = call_json!(app, create(&bob, &b0, 10));
         assert_eq!((status, body["type"].as_str()), (400, Some("E_POLICY")));
 
         let (_, list) = call_json!(app, alice.req(test::TestRequest::get(), "/shared-vaults"));
-        assert_eq!(list["vaults"][0]["maxDataSize"], 10);
+        assert_eq!(list["vaults"][0]["maxDataSize"], 20000);
         assert_eq!(list["vaults"][0]["maxMembers"], 2);
 
-        // the vault's own limit applies, not the account limit (1000)
-        let data = format!("/shared-vaults/{id}/data");
-        let resp = call!(app, alice.req(test::TestRequest::get(), &data));
-        let etag = resp.headers().get("ETag").unwrap().clone();
-        test::read_body(resp).await;
-        let save = |len: usize| {
-            alice
-                .req(test::TestRequest::put(), &data)
-                .insert_header(("If-Match", etag.clone()))
-                .insert_header(("Content-Length", len.to_string()))
-                .set_payload(vec![1u8; len])
-        };
-        let (status, body) = call_json!(app, save(11));
-        assert_eq!((status, body["type"].as_str()), (400, Some("E_POLICY")));
-        assert_eq!(call!(app, save(10)).status().as_u16(), 200);
-
-        // and its member limit
-        let add = |name: &str, key_byte: u8| {
-            alice
-                .req(
-                    test::TestRequest::put(),
-                    &format!("/shared-vaults/{id}/members/{name}"),
-                )
-                .set_json(json!({
-                    "role": "Editor",
-                    "wrappedKey": fake_b64(8, 80),
-                    "publicKey": fake_b64(key_byte, 32),
-                }))
-        };
-        assert_eq!(call!(app, add("bob", 2)).status().as_u16(), 200);
-        let (status, body) = call_json!(app, add("carol", 3));
-        assert_eq!((status, body["type"].as_str()), (400, Some("E_POLICY")));
-        // members using other credentials still get the vault's limits:
-        // dave's policy has none of its own
-        assert_eq!(
-            call!(
-                app,
-                alice.req(
-                    test::TestRequest::delete(),
-                    &format!("/shared-vaults/{id}/members/bob")
-                )
-            )
-            .status()
-            .as_u16(),
-            200
+        // at most 2 members
+        let vault = format!("/shared-vaults/{VAULT_ID}");
+        let r1 = make_record(
+            Some(&r0),
+            &alice,
+            &[
+                (&alice, true, true),
+                (&bob, true, false),
+                (&carol, true, false),
+            ],
         );
-        assert_eq!(call!(app, add("dave", 4)).status().as_u16(), 200);
-        let resp = call!(app, dave.req(test::TestRequest::get(), &data));
-        let etag = resp.headers().get("ETag").unwrap().clone();
-        test::read_body(resp).await;
-        let req = dave
-            .req(test::TestRequest::put(), &data)
-            .insert_header(("If-Match", etag))
-            .insert_header(("Content-Length", "11"))
-            .set_payload(vec![1u8; 11]);
-        assert_eq!(call!(app, req).status().as_u16(), 400);
+        let (status, body) = post_frames!(
+            app,
+            alice,
+            &format!("{vault}/records"),
+            frames(&[&r1, &make_version(&alice, 1, 2, true, 10)]),
+            Some(ETAG_0_1)
+        );
+        assert_eq!((status, body["type"].as_str()), (400, Some("E_POLICY")));
+        // members using other credentials still get the vault's limits
+        let r1 = make_record(
+            Some(&r0),
+            &alice,
+            &[(&alice, true, true), (&dave, true, false)],
+        );
+        let (status, _) = post_frames!(
+            app,
+            alice,
+            &format!("{vault}/records"),
+            frames(&[&r1, &make_version(&alice, 1, 2, true, 10)]),
+            Some(ETAG_0_1)
+        );
+        assert_eq!(status, 200);
+        let (status, body) = put_version!(
+            app,
+            dave,
+            make_version(&dave, 1, 3, false, 30000),
+            "\"1-2\""
+        );
+        assert_eq!((status, body["type"].as_str()), (400, Some("E_POLICY")));
+        let (status, _) = put_version!(app, dave, make_version(&dave, 1, 3, false, 100), "\"1-2\"");
+        assert_eq!(status, 200);
 
         // deleting the vault gives the policy its count back
-        let resp = call!(
-            app,
-            alice.req(test::TestRequest::delete(), &format!("/shared-vaults/{id}"))
-        );
+        let resp = call!(app, alice.req(test::TestRequest::delete(), &vault));
         assert_eq!(resp.status().as_u16(), 200);
-        let (status, _) = create_vault!(app, bob, 2);
+        let (status, _) = call_json!(app, create(&bob, &b0, 10));
         assert_eq!(status, 201);
+    }
+
+    /// A crash while starting an epoch is finished (if its first version was
+    /// saved) or undone (if only the record was) on the next start.
+    #[actix_web::test]
+    async fn interrupted_epoch_change_is_recovered() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let state = make_test_app(tmpdir.path()).await;
+        let app = init_app!(state);
+        let alice = TestUser::new("alice", None);
+        setup_users!(app, alice);
+        let r0 = make_record(None, &alice, &[(&alice, true, true)]);
+        let (status, _) = post_frames!(
+            app,
+            alice,
+            "/shared-vaults",
+            frames(&[&r0, &make_version(&alice, 0, 1, false, 10)]),
+            None
+        );
+        assert_eq!(status, 201);
+        let dir = tmpdir
+            .path()
+            .join(format!("server_data/.shared/vaults/{VAULT_ID}"));
+        let r1 = make_record(Some(&r0), &alice, &[(&alice, true, true)]);
+
+        // only the record was saved
+        std::fs::write(dir.join("records/1"), &r1).unwrap();
+        let reloaded = make_test_app(tmpdir.path()).await;
+        {
+            let vaults = reloaded.shared_vaults.vaults.read().await;
+            assert_eq!(vaults[VAULT_ID].read().await.record.seq, 0);
+        }
+        assert!(!dir.join("records/1").exists());
+
+        // the record and the epoch's first version were saved
+        std::fs::write(dir.join("records/1"), &r1).unwrap();
+        std::fs::write(dir.join("next"), make_version(&alice, 1, 2, true, 10)).unwrap();
+        let reloaded = make_test_app(tmpdir.path()).await;
+        let vaults = reloaded.shared_vaults.vaults.read().await;
+        let vault = vaults[VAULT_ID].read().await;
+        assert_eq!((vault.record.seq, vault.version.version), (1, 2));
+        assert!(vault.archives.contains_key(&0));
+        assert!(!dir.join("next").exists());
     }
 }

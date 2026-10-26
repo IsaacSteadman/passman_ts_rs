@@ -1307,16 +1307,79 @@ a {
     background: var(--pm-surface);
   }
 }
-.pm-add-member-confirm {
-  flex-basis: 100%;
-  display: flex;
-  flex-wrap: wrap;
+.pm-member-perm {
+  display: inline-flex;
   align-items: center;
-  gap: 0.5rem;
+  gap: 0.25em;
+  font-size: 0.85em;
+  color: var(--pm-text-label);
+}
+.pm-unverified {
+  color: var(--pm-danger);
+}
+.pm-member-new {
+  color: var(--pm-accent-fg);
+}
+.pm-sharing-identity {
+  margin-bottom: 1rem;
+  .pm-inline-form {
+    margin-top: 0.75rem;
+  }
+}
+.pm-contacts {
+  margin-top: 0.75rem;
+  summary {
+    cursor: pointer;
+    font-size: 0.9em;
+    color: var(--pm-text-label);
+  }
+  .pm-member-list {
+    margin-top: 0.5rem;
+  }
+}
+// Verifying someone (verification.ts)
+.pm-verify-modal {
+  max-width: 34rem;
+  max-height: 90vh;
+  overflow-y: auto;
+}
+.pm-qr {
+  display: block;
+  margin: 0.5rem auto;
+  image-rendering: pixelated;
+  background: #fff;
+}
+.pm-qr-video {
+  display: block;
+  width: 100%;
+  max-height: 50vh;
+  margin-top: 0.75rem;
+  border-radius: 6px;
+  background: #000;
+}
+.pm-fingerprint,
+.pm-safety-number {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  text-align: center;
+  word-spacing: 0.3em;
+}
+.pm-safety-number {
+  font-size: 1.15em;
+  letter-spacing: 0.04em;
+  line-height: 1.6;
+}
+.pm-verify-result {
+  margin-top: 1rem;
   font-size: 0.9em;
-  .pm-field-hint {
-    flex-basis: 100%;
-    margin: 0;
+  &.pm-verify-ok {
+    color: var(--pm-success);
+  }
+  &.pm-verify-bad {
+    padding: 0.6em 0.85em;
+    border: 1px solid var(--pm-alert-border);
+    border-radius: 6px;
+    color: var(--pm-alert-text);
+    background: var(--pm-alert-bg);
   }
 }
 .pm-btn.pm-danger-text {

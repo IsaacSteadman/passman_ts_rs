@@ -11,6 +11,8 @@ import { initLockScreen } from "./lockScreen";
 import { initPassgenPanel } from "./passgenPanel";
 import { initImportExportPanel } from "./importExportPanel";
 import { initSharedVaultsPanel } from "./sharedVaults";
+import { accountId } from "./deviceStore";
+import { prepareForVault } from "./vaultTransfer";
 import { initTheme } from "./theme";
 
 initTheme();
@@ -81,11 +83,35 @@ document.addEventListener("DOMContentLoaded", async () => {
     (entries) => contentHandle.recordChanges(entries),
     (task) => contentHandle.suspendAutoLock(task),
   );
-  const sharedVaultsHandle = initSharedVaultsPanel(
-    () => contentHandle.getSession(),
-    () => contentHandle.getSharingKeys(),
-    (keys) => contentHandle.setSharingKeys(keys),
-  );
+  const sharedVaultsHandle = initSharedVaultsPanel({
+    getSession: () => contentHandle.getSession(),
+    getSharing: () => contentHandle.getSharing(),
+    setSharing: (sharing) => contentHandle.setSharing(sharing),
+    cacheAccount: () => {
+      const session = contentHandle.getSession();
+      return session && contentHandle.isRemembered()
+        ? accountId(session.username, session.serverNs)
+        : null;
+    },
+    copyToOwnVault: async (tables) => {
+      const current = contentHandle.getCurrentData()?.tables;
+      if (current == null) return;
+      const added = prepareForVault(
+        tables,
+        current.map((table) => table.name),
+      );
+      current.push(...added);
+      const timestamp = new Date().toISOString();
+      await contentHandle.recordChanges(
+        added.map((table) => ({
+          kind: "table-add" as const,
+          timestamp,
+          tableId: table.id,
+          tableName: table.name,
+        })),
+      );
+    },
+  });
 
   const onLogin = (result: LoginResult) => {
     errorPanel.textContent = "";

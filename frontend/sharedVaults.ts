@@ -1,69 +1,85 @@
-// The Shared Vaults section: vaults that several users can open and edit
-// (see src/shared_vaults.rs). As with the user's own vault, the server only
-// sees ciphertext. Each shared vault is encrypted with its own random key; the
-// server keeps that key sealed to each member's sharing key (an X25519 public
-// key), whose secret half is kept in the member's own vault.
+// The Shared Vaults section: the user's sharing identity, the people they've
+// verified, and the shared vaults they're in (see sharedVaultModel.ts for how
+// those are checked, saved and kept on the device).
 
 import type { Session } from "./contentArea";
-import { credentialHeaders, decodeVault } from "./loginArea";
-import { mergeVaults, vaultsEqual } from "./merge";
+import { listSharedVaults } from "./deviceStore";
 import {
   type HistoryEntry,
   type PassTableCallbacks,
   type PassTableData,
-  type SharingKeys,
-  type VaultRoot,
+  type SharingContact,
+  type SharingData,
+  describeHistoryEntry,
   renderPassTable,
 } from "./PassTable";
 import {
-  decryptBlob,
-  encryptBlob,
-  fromBase64Url,
-  generateSharingKeyPair,
-  sealTo,
-  toBase64Url,
-  unsealWith,
-  XCHACHA20_KEY_SIZE,
-} from "./passman_crypto_glue";
+  OfflineError,
+  ServerError,
+  SharedVault,
+  SharingClient,
+} from "./sharedVaultModel";
+import {
+  type Member,
+  fingerprintOf,
+  formatFingerprint,
+  identityBundle,
+  newIdentitySecret,
+} from "./sharingCrypto";
+import {
+  closeVerificationDialogs,
+  showMyCode,
+  verifyUser,
+} from "./verification";
 
 export interface SharedVaultsPanelHandle {
   /** Loads the shared vaults (after unlocking). */
   show(): void;
-  /** Forgets the vault keys and decrypted vaults (on locking). */
+  /** Forgets the keys and decrypted vaults (on locking). */
   clear(): void;
-  /** Whether a change to a shared vault hasn't been saved yet. */
+  /** Whether a change to a shared vault would be lost by locking now. */
   hasUnsavedChanges(): boolean;
 }
 
-type Role = "Owner" | "Editor";
-
-/** A shared vault as listed by the server (GET /shared-vaults). */
-interface VaultInfo {
-  id: string;
-  role: Role;
-  wrappedKey: string;
-  encryptedName: string;
-  members: { username: string; role: Role }[];
-  size: number;
-  maxDataSize: number | null;
-  maxMembers: number;
-  writable: boolean;
+export interface SharedVaultsDeps {
+  getSession: () => Session | null;
+  getSharing: () => SharingData | null;
+  /** Saves the sharing identity and contacts in the user's own vault; true
+   *  once the server has them. */
+  setSharing: (sharing: SharingData) => Promise<boolean>;
+  /** The account's id on this device if it's remembered. */
+  cacheAccount: () => string | null;
+  /** Adds tables to the user's own vault. */
+  copyToOwnVault: (tables: PassTableData[]) => Promise<void>;
 }
 
-const HISTORY_LIMIT = 100;
-const encoder = new TextEncoder();
-const decoder = new TextDecoder();
+function el<K extends keyof HTMLElementTagNameMap>(
+  tag: K,
+  className = "",
+  text?: string,
+): HTMLElementTagNameMap[K] {
+  const e = document.createElement(tag);
+  if (className) e.className = className;
+  if (text != null) e.textContent = text;
+  return e;
+}
 
-/** A short, readable digest of a sharing key, for checking out of band that
- *  the server handed out the right one. */
-export async function fingerprint(publicKey: string): Promise<string> {
-  const digest = new Uint8Array(
-    await crypto.subtle.digest("SHA-256", fromBase64Url(publicKey)),
-  );
-  const hex = Array.from(digest.subarray(0, 16), (b) =>
-    b.toString(16).padStart(2, "0"),
-  ).join("");
-  return hex.match(/.{4}/g)!.join(" ");
+function button(
+  label: string,
+  className = "pm-btn pm-btn-ghost",
+): HTMLButtonElement {
+  const b = el("button", className, label);
+  b.type = "button";
+  return b;
+}
+
+function checkbox(label: string, checked: boolean): HTMLLabelElement {
+  const wrap = el("label", "pm-member-perm");
+  const input = el("input");
+  input.type = "checkbox";
+  input.checked = checked;
+  wrap.append(input, document.createTextNode(label));
+  return wrap;
 }
 
 function formatSize(bytes: number): string {
@@ -72,216 +88,290 @@ function formatSize(bytes: number): string {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
-function button(
-  label: string,
-  className = "pm-btn pm-btn-ghost",
-): HTMLButtonElement {
-  const b = document.createElement("button");
-  b.type = "button";
-  b.className = className;
-  b.textContent = label;
-  return b;
+function errorMessage(e: unknown): string {
+  if (e instanceof OfflineError) return "can't reach the server";
+  return e instanceof Error ? e.message : String(e);
 }
 
-function el<K extends keyof HTMLElementTagNameMap>(
-  tag: K,
-  className: string,
-  text?: string,
-): HTMLElementTagNameMap[K] {
-  const e = document.createElement(tag);
-  e.className = className;
-  if (text != null) e.textContent = text;
-  return e;
-}
+const plusIcon = `<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15"/></svg>`;
 
 export function initSharedVaultsPanel(
-  getSession: () => Session | null,
-  getSharingKeys: () => SharingKeys | null,
-  setSharingKeys: (keys: SharingKeys) => Promise<boolean>,
+  deps: SharedVaultsDeps,
 ): SharedVaultsPanelHandle {
   const panel = document.querySelector("#shared-vaults") as HTMLElement;
   const field = <T extends Element>(selector: string) =>
     panel.querySelector(selector) as T;
   const intro = field<HTMLElement>("[name='shared-intro']");
   const setupButton = field<HTMLButtonElement>("button[name='setup-sharing']");
+  const identityDiv = field<HTMLElement>("[name='sharing-identity']");
   const fingerprintLine = field<HTMLElement>("[name='sharing-fingerprint']");
+  const showCodeButton = field<HTMLButtonElement>(
+    "button[name='show-my-code']",
+  );
+  const verifyForm = field<HTMLFormElement>("form[name='verify-someone']");
+  const verifyName = field<HTMLInputElement>("input[name='verify-username']");
+  const contactsDetails = field<HTMLDetailsElement>("details[name='contacts']");
   const list = field<HTMLElement>("[name='shared-list']");
   const createForm = field<HTMLFormElement>("form[name='create-shared']");
   const createName = field<HTMLInputElement>("input[name='shared-name']");
   const status = field<HTMLElement>("[name='shared-status']");
 
-  /** Bumped by `clear`, so requests from a locked session are ignored. */
-  let generation = 0;
+  const client = new SharingClient({
+    session: deps.getSession,
+    sharing: deps.getSharing,
+    cacheAccount: deps.cacheAccount,
+  });
   const cards = new Map<string, VaultCard>();
+  /** The user's own fingerprint, by identity secret. */
+  let ownFingerprint: { secret: string; fingerprint: string } | null = null;
 
-  // ── Requests ──────────────────────────────────────────────────────────────
-
-  /** Makes a request as the unlocked user; null if the server couldn't be
-   *  reached (or the session ended meanwhile). */
-  async function request(
-    method: string,
-    path: string,
-    init: {
-      query?: Record<string, string>;
-      json?: unknown;
-      body?: Uint8Array<ArrayBuffer>;
-      headers?: Record<string, string>;
-    } = {},
-  ): Promise<Response | null> {
-    const session = getSession();
-    if (session == null) return null;
-    const started = generation;
-    const url = new URL(path, window.location.origin);
-    url.searchParams.set("username", session.username);
-    if (session.serverNs != null)
-      url.searchParams.set("server_ns", session.serverNs);
-    for (const [k, v] of Object.entries(init.query ?? {}))
-      url.searchParams.set(k, v);
-    const headers: Record<string, string> = {
-      ...credentialHeaders(session.authKeyB64, session.serverPass),
-      ...init.headers,
-    };
-    let body: BodyInit | undefined;
-    if (init.json !== undefined) {
-      headers["Content-Type"] = "application/json";
-      body = JSON.stringify(init.json);
-    } else if (init.body !== undefined) {
-      headers["Content-Type"] = "application/octet-stream";
-      body = init.body;
-    }
-    try {
-      const response = await fetch(url.toString(), {
-        method,
-        headers,
-        body,
-        cache: "no-store",
-      });
-      return started === generation ? response : null;
-    } catch {
-      return null;
-    }
-  }
-
-  /** The error to show for a failed request. */
-  async function failure(
-    response: Response | null,
-    action: string,
-  ): Promise<string> {
-    if (response == null) return `⚠ Couldn't ${action}: can't reach the server`;
-    const text = await response.text();
-    try {
-      const body = JSON.parse(text) as {
-        message?: string;
-        policy_message?: string;
+  function myFingerprint(): string | null {
+    const sharing = deps.getSharing();
+    if (sharing == null) return null;
+    if (ownFingerprint?.secret !== sharing.identitySecret)
+      ownFingerprint = {
+        secret: sharing.identitySecret,
+        fingerprint: fingerprintOf(identityBundle(sharing.identitySecret)),
       };
-      const reason = body.policy_message ?? body.message;
-      if (reason) return `⚠ Couldn't ${action}: ${reason}`;
-    } catch {
-      // not JSON
-    }
-    return `⚠ Couldn't ${action} (${response.status}): ${text}`;
+    return ownFingerprint.fingerprint;
   }
 
-  // ── Sharing keys ──────────────────────────────────────────────────────────
+  function contacts(): Record<string, SharingContact> {
+    return deps.getSharing()?.contacts ?? {};
+  }
 
-  /** Makes sure the server has this user's sharing key, creating the key
-   *  pair first if needed. Returns the keys, or an error to show. */
-  async function ensureSharingKeys(): Promise<SharingKeys | string> {
-    let keys = getSharingKeys();
-    if (keys == null) {
-      const existing = await request("GET", "/sharing-key");
-      if (existing == null) return "⚠ Can't reach the server";
-      if (existing.ok)
+  // ── Identity ──────────────────────────────────────────────────────────────
+
+  /** Creates the user's identity if needed and makes sure the server has
+   *  it. Returns an error to show, or null. */
+  async function ensureIdentity(): Promise<string | null> {
+    let sharing = deps.getSharing();
+    if (sharing == null) {
+      const session = deps.getSession();
+      if (session == null) return "Not logged in";
+      if ((await client.identityOf(session.username)) != null)
         return "Sharing was set up in another session. Reload the page to use it here.";
-      const pair = generateSharingKeyPair();
-      keys = {
-        publicKey: toBase64Url(pair.publicKey),
-        secretKey: toBase64Url(pair.secretKey),
-      };
-      // kept in the vault before it's published, so the secret key can't be
-      // lost while others seal vault keys to it
-      if (!(await setSharingKeys(keys)))
-        return "⚠ Couldn't save your sharing key to your vault (see the status at the top). Try again once it's saved.";
+      sharing = { identitySecret: newIdentitySecret(), contacts: {} };
+      // kept in the vault before it's published, so the identity can't be
+      // lost while others give it access to their vaults
+      if (!(await deps.setSharing(sharing)))
+        return "⚠ Couldn't save your sharing identity to your vault (see the status at the top). Try again once it's saved.";
     }
-    const response = await request("PUT", "/sharing-key", {
-      json: { publicKey: keys.publicKey },
-    });
-    if (response == null || !response.ok)
-      return failure(response, "publish your sharing key");
-    return keys;
+    try {
+      await client.publishIdentity(sharing.identitySecret);
+    } catch (e) {
+      if (e instanceof ServerError && e.type === "E_IDENTITY_IN_USE")
+        return "⚠ The server has a different sharing identity for you, which shared vaults use. Your vault's identity can't replace it.";
+      throw e;
+    }
+    return null;
   }
 
-  async function renderSetup(): Promise<void> {
-    const keys = getSharingKeys();
-    setupButton.hidden = keys != null;
-    createForm.hidden = keys == null;
+  function renderIdentity(): void {
+    const fingerprint = myFingerprint();
+    setupButton.hidden = fingerprint != null;
+    identityDiv.hidden = fingerprint == null;
+    createForm.hidden = fingerprint == null;
     intro.textContent =
-      keys == null
-        ? "Share tables with other people. Setting up sharing creates a sharing key, kept in your vault, that others use to give you access to their shared vaults."
-        : "Vaults you share with other people. Everyone in a shared vault can see and change its tables.";
+      fingerprint == null
+        ? "Share tables with people you trust. Setting up sharing creates your sharing identity: post-quantum keys kept in your vault, whose public half others use to give you access."
+        : "Vaults you share with other people. Only members can read them, and before adding someone you verify their identity in person or on a call.";
     fingerprintLine.textContent =
-      keys == null
+      fingerprint == null
         ? ""
-        : `Your sharing key fingerprint: ${await fingerprint(keys.publicKey)}`;
+        : `Your identity's fingerprint: ${formatFingerprint(fingerprint)}`;
+    renderContacts();
+  }
+
+  function renderContacts(): void {
+    const entries = Object.entries(contacts()).sort(([a], [b]) =>
+      a.localeCompare(b),
+    );
+    const summary = el(
+      "summary",
+      "",
+      `People you've verified (${entries.length})`,
+    );
+    const ul = el("ul", "pm-member-list");
+    for (const [name, contact] of entries) {
+      const li = el("li");
+      li.dataset.username = name;
+      li.append(
+        el("span", "pm-member-name", name),
+        el(
+          "span",
+          "pm-shared-meta",
+          `${contact.method === "qr" ? "QR code" : "safety number"}, ${new Date(contact.verifiedAt).toLocaleDateString()}`,
+        ),
+      );
+      const forget = button("Forget");
+      forget.addEventListener("click", async () => {
+        const sharing = deps.getSharing();
+        if (sharing == null) return;
+        const rest = { ...sharing.contacts };
+        delete rest[name];
+        await deps.setSharing({ ...sharing, contacts: rest });
+        renderContacts();
+        for (const card of cards.values()) card.render();
+      });
+      li.append(forget);
+      ul.append(li);
+    }
+    if (entries.length === 0)
+      ul.append(
+        el(
+          "li",
+          "pm-empty-note",
+          "Nobody yet. Verify someone to be able to add them to a vault.",
+        ),
+      );
+    contactsDetails.replaceChildren(summary, ul);
   }
 
   setupButton.addEventListener("click", async () => {
     setupButton.disabled = true;
     status.textContent = "Setting up sharing…";
     try {
-      const result = await ensureSharingKeys();
-      status.textContent = typeof result === "string" ? result : "";
-      await renderSetup();
+      status.textContent = (await ensureIdentity()) ?? "";
+      renderIdentity();
+      if (deps.getSharing()) await refresh();
+    } catch (e) {
+      status.textContent = `⚠ Couldn't set up sharing: ${errorMessage(e)}`;
     } finally {
       setupButton.disabled = false;
     }
   });
 
-  // ── List ──────────────────────────────────────────────────────────────────
+  showCodeButton.addEventListener("click", () => {
+    const session = deps.getSession();
+    const fingerprint = myFingerprint();
+    if (session && fingerprint) showMyCode(session.username, fingerprint);
+  });
 
-  async function refresh(): Promise<void> {
-    const keys = getSharingKeys();
-    if (keys == null) return;
-    const response = await request("GET", "/shared-vaults");
-    if (response == null || !response.ok) {
-      status.textContent = await failure(response, "load shared vaults");
+  verifyForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const name = verifyName.value.trim();
+    const session = deps.getSession();
+    const fingerprint = myFingerprint();
+    if (!name || session == null || fingerprint == null) return;
+    if (name === session.username) {
+      status.textContent = "That's you.";
       return;
     }
-    const { vaults } = (await response.json()) as { vaults: VaultInfo[] };
-    const secretKey = fromBase64Url(keys.secretKey);
-    const seen = new Set<string>();
-    for (const info of vaults) {
-      seen.add(info.id);
-      const card = cards.get(info.id);
-      if (card) card.update(info);
-      else {
-        const created = new VaultCard(info, secretKey);
-        cards.set(info.id, created);
-        list.append(created.details);
-      }
+    status.textContent = "Looking them up…";
+    let identity: Awaited<ReturnType<SharingClient["identityOf"]>>;
+    try {
+      identity = await client.identityOf(name);
+    } catch (e) {
+      status.textContent = `⚠ Couldn't look up ${name}: ${errorMessage(e)}`;
+      return;
     }
-    for (const [id, card] of cards) {
-      if (!seen.has(id)) {
-        card.details.remove();
-        cards.delete(id);
-      }
+    if (identity == null) {
+      status.textContent = `No user named ${name} has set up sharing.`;
+      return;
     }
-    if (status.textContent?.startsWith("⚠ Couldn't load"))
-      status.textContent = "";
+    status.textContent = "";
+    verifyName.value = "";
+    verifyUser({
+      me: { username: session.username, fingerprint },
+      target: { username: name, fingerprint: identity.fingerprint },
+      onVerified: async (contact) => {
+        const sharing = deps.getSharing();
+        if (sharing == null) return;
+        await deps.setSharing({
+          ...sharing,
+          contacts: { ...sharing.contacts, [name]: contact },
+        });
+        renderContacts();
+        for (const card of cards.values()) card.render();
+      },
+    });
+  });
+
+  // ── Vaults ────────────────────────────────────────────────────────────────
+
+  function addCard(vault: SharedVault, open = false): VaultCard {
+    const card = new VaultCard(vault);
+    cards.set(vault.id, card);
+    list.append(card.details);
+    card.details.open = open;
+    renderEmpty();
+    return card;
+  }
+
+  function removeCard(id: string): void {
+    cards.get(id)?.details.remove();
+    cards.delete(id);
     renderEmpty();
   }
 
   function renderEmpty(): void {
-    list.querySelector(".pm-empty-note")?.remove();
-    if (cards.size === 0)
+    list.querySelector(":scope > .pm-empty-note")?.remove();
+    if (cards.size === 0 && deps.getSharing())
       list.append(
         el(
           "p",
           "pm-empty-note",
-          "No shared vaults yet. Create one, or give someone your username to be added to theirs.",
+          "No shared vaults yet. Create one, or ask someone to verify you and add you to theirs.",
         ),
       );
   }
+
+  /** Shows the vaults kept on this device, before reaching the server. */
+  async function loadCached(): Promise<void> {
+    const account = deps.cacheAccount();
+    if (account == null) return;
+    for (const cached of await listSharedVaults(account).catch(() => [])) {
+      if (cards.has(cached.vaultId)) continue;
+      try {
+        addCard(SharedVault.fromCache(client, cached));
+      } catch (e) {
+        status.textContent = `⚠ Couldn't open a shared vault kept on this device: ${errorMessage(e)}`;
+      }
+    }
+  }
+
+  let refreshing: Promise<void> | null = null;
+
+  /** Brings every vault up to date with the server. */
+  function refresh(): Promise<void> {
+    refreshing ??= (async () => {
+      try {
+        const infos = await client.listVaults();
+        const listed = new Set(infos.map((info) => info.id));
+        for (const info of infos) {
+          const card = cards.get(info.id);
+          if (card) void card.vault.sync(info);
+          else {
+            try {
+              const vault = await SharedVault.download(client, info);
+              addCard(vault);
+              // e.g. to remove members who left
+              void vault.sync(info);
+            } catch (e) {
+              status.textContent = `⚠ Couldn't open a shared vault: ${errorMessage(e)}`;
+            }
+          }
+        }
+        for (const [id, card] of cards)
+          if (!listed.has(id)) card.vault.markRemoved();
+        if (status.textContent?.startsWith("Offline")) status.textContent = "";
+      } catch (e) {
+        status.textContent =
+          e instanceof OfflineError
+            ? "Offline — shared vaults kept on this device can still be opened"
+            : `⚠ Couldn't load shared vaults: ${errorMessage(e)}`;
+      } finally {
+        refreshing = null;
+        renderEmpty();
+      }
+    })();
+    return refreshing;
+  }
+
+  window.addEventListener("online", () => {
+    if (deps.getSharing() && deps.getSession()) void refresh();
+  });
 
   createForm.addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -294,274 +384,196 @@ export function initSharedVaultsPanel(
     submit.disabled = true;
     try {
       status.textContent = "Creating…";
-      const keys = await ensureSharingKeys();
-      if (typeof keys === "string") {
-        status.textContent = keys;
+      const problem = await ensureIdentity();
+      if (problem) {
+        status.textContent = problem;
         return;
       }
-      const vaultKey = crypto.getRandomValues(
-        new Uint8Array(XCHACHA20_KEY_SIZE),
-      );
-      const response = await request("POST", "/shared-vaults", {
-        json: {
-          encryptedName: toBase64Url(
-            encryptBlob(vaultKey, encoder.encode(name)),
-          ),
-          wrappedKey: toBase64Url(
-            sealTo(fromBase64Url(keys.publicKey), vaultKey),
-          ),
-          publicKey: keys.publicKey,
-        },
-      });
-      if (response == null || !response.ok) {
-        status.textContent = await failure(response, "create the shared vault");
-        return;
-      }
-      const { id } = (await response.json()) as { id: string };
+      const vault = await SharedVault.create(client, name);
       createName.value = "";
       status.textContent = "";
+      addCard(vault, true);
       await refresh();
-      const card = cards.get(id);
-      if (card) card.details.open = true;
+    } catch (e) {
+      status.textContent = `⚠ Couldn't create the shared vault: ${errorMessage(e)}`;
     } finally {
       submit.disabled = false;
     }
   });
 
-  // ── One shared vault ──────────────────────────────────────────────────────
+  // ── One vault ─────────────────────────────────────────────────────────────
 
   class VaultCard {
     readonly details = el("details", "pm-chg-pass-details pm-shared-vault");
     private readonly summaryName = el("span", "pm-shared-name");
     private readonly summaryMeta = el("span", "pm-shared-meta");
     private readonly statusLine = el("p", "pm-chg-pass-status");
+    private readonly noticeDiv = el("div");
     private readonly tablesDiv = el("div", "pm-shared-tables");
-    private readonly manageDiv = el("div", "pm-device-subsection");
-    private info: VaultInfo;
-    /** null when the vault key couldn't be unsealed */
-    private key: Uint8Array | null = null;
-    private name = "";
-    /** This session's data, and the version last loaded or saved. */
-    private data: VaultRoot | null = null;
-    private base: VaultRoot | null = null;
-    private etag: string | null = null;
-    private queue: Promise<void> = Promise.resolve();
-    private loading: Promise<void> | null = null;
+    private readonly historyDetails = el("details", "pm-history-details");
+    private readonly membersDiv = el("div", "pm-device-subsection");
+    private readonly actionsDiv = el("div", "pm-device-actions");
+    /** What the tables were last drawn from, so they're only redrawn (which
+     *  would end an edit in progress) when that changes. */
+    private drawn: { data: object; readOnly: boolean } | null = null;
+    /** Member list changes not applied yet. */
+    private draft: Member[] | null = null;
 
-    constructor(info: VaultInfo, secretKey: Uint8Array) {
-      this.info = info;
-      try {
-        this.key = unsealWith(secretKey, fromBase64Url(info.wrappedKey));
-      } catch {
-        this.key = null;
-      }
-      const summary = document.createElement("summary");
+    constructor(readonly vault: SharedVault) {
+      const summary = el("summary");
       summary.append(this.summaryName, this.summaryMeta);
       const body = el("div", "pm-chg-pass-body");
-      body.append(this.statusLine, this.tablesDiv, this.manageDiv);
-      this.details.append(summary, body);
-      this.details.addEventListener("toggle", () => {
-        if (this.details.open) void this.load();
+      this.historyDetails.append(el("summary", "", "History"));
+      this.historyDetails.addEventListener("toggle", () => {
+        if (this.historyDetails.open) void this.showHistory();
       });
-      this.update(info);
-    }
-
-    update(info: VaultInfo): void {
-      this.info = info;
-      if (this.key) {
-        try {
-          this.name = decoder.decode(
-            decryptBlob(this.key, fromBase64Url(info.encryptedName)),
-          );
-        } catch {
-          this.name = "(unreadable name)";
-        }
-      } else this.name = "(can't be opened)";
-      this.summaryName.textContent = this.name;
-      const count = info.members.length;
-      this.summaryMeta.textContent = `${info.role} · ${count} ${count === 1 ? "member" : "members"}`;
-      this.renderManage();
-    }
-
-    hasUnsavedChanges(): boolean {
-      return (
-        this.data != null &&
-        this.base != null &&
-        !vaultsEqual(this.data, this.base)
+      body.append(
+        this.statusLine,
+        this.noticeDiv,
+        this.tablesDiv,
+        this.historyDetails,
+        this.membersDiv,
+        this.actionsDiv,
       );
+      this.details.append(summary, body);
+      vault.onChange = () => this.render();
+      this.render();
     }
 
-    private setStatus(text: string): void {
-      this.statusLine.textContent = text;
-    }
-
-    private showUsage(): void {
-      const { size, maxDataSize, writable } = this.info;
-      const usage =
-        maxDataSize == null
-          ? `Uses ${formatSize(size)}`
-          : `Uses ${formatSize(size)} of ${formatSize(maxDataSize)}`;
-      this.setStatus(
-        writable
-          ? usage
-          : `${usage}. The server no longer allows changes to this vault.`,
-      );
-    }
-
-    /** Downloads and decrypts the latest version, or returns an error. */
-    private async download(): Promise<
-      { data: VaultRoot; etag: string | null } | string
-    > {
-      if (this.key == null) return "No key";
-      const response = await request(
-        "GET",
-        `/shared-vaults/${this.info.id}/data`,
-      );
-      if (response == null || !response.ok)
-        return failure(response, "load the vault");
-      const blob = new Uint8Array(await response.arrayBuffer());
-      try {
-        return {
-          // a new vault is empty until its first save
-          data:
-            blob.byteLength === 0
-              ? { tables: [], history: [] }
-              : decodeVault(this.key, blob),
-          etag: response.headers.get("ETag"),
-        };
-      } catch (e) {
-        return `⚠ Couldn't decrypt the vault: ${e}`;
-      }
-    }
-
-    private load(): Promise<void> {
-      if (this.data != null) return Promise.resolve();
-      if (this.key == null) {
-        this.setStatus(
-          "⚠ This vault's key was sealed to a different sharing key than yours, so it can't be opened. Ask an owner to add you again.",
-        );
-        return Promise.resolve();
-      }
-      this.loading ??= (async () => {
-        this.setStatus("Loading…");
-        const latest = await this.download();
-        this.loading = null;
-        if (typeof latest === "string") {
-          this.setStatus(latest);
-          return;
-        }
-        this.base = latest.data;
-        this.data = structuredClone(latest.data);
-        this.etag = latest.etag;
-        this.showUsage();
-        this.render();
-      })();
-      return this.loading;
-    }
-
-    // ── Saving ──────────────────────────────────────────────────────────────
-
-    private record(entry: HistoryEntry): Promise<void> {
-      if (this.data == null) return Promise.resolve();
-      this.data.history.push(entry);
-      if (this.data.history.length > HISTORY_LIMIT)
-        this.data.history.splice(0, this.data.history.length - HISTORY_LIMIT);
-      return this.save();
-    }
-
-    private save(): Promise<void> {
-      this.queue = this.queue.then(() => this.saveNow());
-      return this.queue;
-    }
-
-    private async saveNow(): Promise<void> {
-      // a save refused because someone else saved first is retried after
-      // merging their changes
-      for (let attempt = 0; attempt < 3; attempt++) {
-        if (this.data == null || this.key == null) return;
-        if (!this.hasUnsavedChanges()) return;
-        this.setStatus("Saving…");
-        const json = JSON.stringify(this.data);
-        const blob = encryptBlob(this.key, encoder.encode(json));
-        const headers: Record<string, string> = {};
-        if (this.etag != null) headers["If-Match"] = this.etag;
-        const response = await request(
-          "PUT",
-          `/shared-vaults/${this.info.id}/data`,
-          { body: blob, headers },
-        );
-        if (response == null) {
-          this.setStatus(
-            "⚠ Offline — changes to this shared vault aren't saved yet; keep this page open until you're back online and make another change",
-          );
-          return;
-        }
-        if (response.status === 412) {
-          if (!(await this.mergeLatest())) return;
-          continue;
-        }
-        if (!response.ok) {
-          this.setStatus(await failure(response, "save"));
-          return;
-        }
-        this.etag = response.headers.get("ETag");
-        this.base = JSON.parse(json) as VaultRoot;
-        this.info = { ...this.info, size: blob.byteLength };
-        this.showUsage();
+    render(): void {
+      const { vault } = this;
+      if (vault.removed && vault.stranded == null) {
+        removeCard(vault.id);
         return;
       }
-      this.setStatus("⚠ Save failed: the vault keeps changing");
+      const me = vault.me;
+      const members = vault.latest.body.members;
+      this.summaryName.textContent = vault.data.name;
+      const parts = [
+        vault.removed
+          ? "No longer a member"
+          : vault.canWrite()
+            ? "Can edit"
+            : "Read only",
+      ];
+      if (me?.manage && !vault.removed) parts.push("Manages members");
+      parts.push(
+        `${members.length} ${members.length === 1 ? "member" : "members"}`,
+      );
+      if (vault.hasUnsavedChanges()) parts.push("unsaved changes");
+      this.summaryMeta.textContent = parts.join(" · ");
+
+      const { info } = vault;
+      const usage =
+        info == null
+          ? ""
+          : info.maxDataSize == null
+            ? `Uses ${formatSize(info.size)}.`
+            : `Uses ${formatSize(info.size)} of ${formatSize(info.maxDataSize)}.`;
+      const readOnlyNote =
+        info?.writable === false
+          ? " The server no longer allows changes to this vault."
+          : "";
+      const status =
+        vault.status && !/[.…]$/.test(vault.status)
+          ? `${vault.status}.`
+          : vault.status;
+      this.statusLine.textContent =
+        [status, usage].filter(Boolean).join(" ") + readOnlyNote;
+
+      this.renderNotices();
+      const readOnly = !vault.canWrite() || vault.removed;
+      if (this.drawn?.data !== vault.data || this.drawn.readOnly !== readOnly) {
+        this.renderTables(readOnly);
+        this.drawn = { data: vault.data, readOnly };
+      }
+      this.renderMembers();
+      this.renderActions();
     }
 
-    /** Merges in the changes someone else saved first. Where the same item
-     *  was changed on both sides their version is kept, and listed. */
-    private async mergeLatest(): Promise<boolean> {
-      if (this.data == null || this.base == null) return false;
-      this.setStatus("Merging changes made by someone else…");
-      const latest = await this.download();
-      if (typeof latest === "string") {
-        this.setStatus(latest);
-        return false;
-      }
-      const { merged, conflicts } = mergeVaults(
-        this.base,
-        this.data,
-        latest.data,
-      );
-      this.base = latest.data;
-      this.data = merged;
-      this.etag = latest.etag;
-      this.render();
-      if (conflicts.length > 0) {
+    private renderNotices(): void {
+      const { vault } = this;
+      if (vault.conflicts.length > 0) {
         const notice = el("div", "pm-conflict");
         notice.setAttribute("role", "alert");
-        const p = el(
-          "p",
-          "",
-          "Someone else changed some of the same items at the same time; their version was kept for:",
+        const ul = el("ul");
+        for (const c of vault.conflicts.splice(0).slice(0, 10))
+          ul.append(el("li", "", c));
+        const ok = button("OK");
+        ok.addEventListener("click", () => notice.remove());
+        notice.append(
+          el(
+            "p",
+            "",
+            "Someone else changed some of the same items at the same time; their version was kept for:",
+          ),
+          ul,
+          ok,
         );
-        const ul = document.createElement("ul");
-        for (const c of conflicts.slice(0, 10)) ul.append(el("li", "", c));
-        const dismiss = button("OK");
-        dismiss.addEventListener("click", () => notice.remove());
-        notice.append(p, ul, dismiss);
-        this.tablesDiv.prepend(notice);
+        this.noticeDiv.append(notice);
       }
-      return true;
+      // anyone with a user's public identity can add them to a vault (even
+      // the server, with an identity of its own), so say when a vault is run
+      // by someone this user hasn't verified
+      this.noticeDiv.querySelector(".pm-unverified-managers")?.remove();
+      const unverified = vault.latest.body.members.filter(
+        (m) => m.manage && !this.verification(m).ok,
+      );
+      if (unverified.length > 0) {
+        const names = unverified.map((m) => m.username).join(", ");
+        this.noticeDiv.append(
+          el(
+            "p",
+            "pm-conflict pm-unverified-managers",
+            `⚠ This vault is managed by ${names}, whose identity you haven't verified. Verify them before trusting it with new passwords: otherwise it could be someone else (even the server) posing as them.`,
+          ),
+        );
+      }
+      this.noticeDiv.querySelector(".pm-stranded")?.remove();
+      if (vault.stranded) {
+        const box = el("div", "pm-conflict pm-stranded");
+        box.setAttribute("role", "alert");
+        const copy = button("Copy them to my vault", "pm-btn pm-btn-primary");
+        copy.addEventListener("click", async () => {
+          if (vault.stranded == null) return;
+          await deps.copyToOwnVault(vault.stranded.tables);
+          vault.discardStranded();
+        });
+        const discard = button("Discard them");
+        discard.addEventListener("click", () => {
+          if (
+            window.confirm(
+              "Discard the changes that couldn't be saved to this shared vault?",
+            )
+          )
+            vault.discardStranded();
+        });
+        box.append(
+          el(
+            "p",
+            "",
+            vault.removed
+              ? "You're no longer a member of this vault, so your unsaved changes to it can't be saved. You can keep a copy of its tables (with your changes) in your own vault."
+              : "You can no longer change this vault, so your unsaved changes to it can't be saved. You can keep a copy of its tables (with your changes) in your own vault.",
+          ),
+          copy,
+          discard,
+        );
+        this.noticeDiv.append(box);
+      }
     }
 
-    // ── Rendering ───────────────────────────────────────────────────────────
-
-    private render(): void {
-      const data = this.data;
-      if (data == null) return;
+    private renderTables(readOnly: boolean): void {
+      const { vault } = this;
+      const data = vault.data;
       this.tablesDiv.replaceChildren();
       const callbacks: PassTableCallbacks = {
         onFetchBeforeEdit: () => Promise.resolve(),
-        onAction: (entry) => this.record(entry),
+        onAction: (entry) => vault.record(entry),
+        readOnly,
       };
       const renderTable = (table: PassTableData, before: Node | null) => {
-        const div = document.createElement("div");
+        const div = el("div");
         renderPassTable(table, div, callbacks, () => {
           const idx = data.tables.indexOf(table);
           if (idx < 0) return;
@@ -579,9 +591,12 @@ export function initSharedVaultsPanel(
         this.tablesDiv.insertBefore(div, before);
       };
       data.tables.forEach((table) => renderTable(table, null));
+      if (data.tables.length === 0 && readOnly)
+        this.tablesDiv.append(el("p", "pm-empty-note", "No tables yet."));
+      if (readOnly) return;
       const addButton = el("button", "pm-add-btn");
-      addButton.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15"/></svg>Add Table`;
       addButton.type = "button";
+      addButton.innerHTML = `${plusIcon}Add Table`;
       addButton.addEventListener("click", () => {
         const table: PassTableData = {
           id: crypto.randomUUID(),
@@ -601,242 +616,299 @@ export function initSharedVaultsPanel(
       this.tablesDiv.append(addButton);
     }
 
-    /** Members, and (for owners) adding members, renaming and deleting. */
-    private renderManage(): void {
-      const session = getSession();
-      if (session == null) return;
-      const me = session.username;
-      const { info } = this;
-      const isOwner = info.role === "Owner";
-      const owners = info.members.filter((m) => m.role === "Owner").length;
-      const manageStatus = el("p", "pm-chg-pass-status");
-      const run = async (
-        action: string,
-        task: () => Promise<Response | null>,
-      ): Promise<boolean> => {
-        manageStatus.textContent = "…";
-        const response = await task();
-        if (response == null || !response.ok) {
-          manageStatus.textContent = await failure(response, action);
-          return false;
-        }
-        manageStatus.textContent = "";
-        await refresh();
-        return true;
-      };
-      const memberPath = (username: string) =>
-        `/shared-vaults/${info.id}/members/${encodeURIComponent(username)}`;
-
-      this.manageDiv.replaceChildren();
-      this.manageDiv.append(el("p", "pm-device-status", "Members"));
-      const members = el("ul", "pm-member-list");
-      for (const member of info.members) {
-        const li = document.createElement("li");
-        li.dataset.username = member.username;
-        li.append(
+    private async showHistory(): Promise<void> {
+      const listDiv = el("div", "pm-history-list");
+      this.historyDetails.replaceChildren(
+        el("summary", "", "History"),
+        listDiv,
+      );
+      listDiv.append(el("p", "pm-empty-note", "Loading…"));
+      let entries: HistoryEntry[];
+      try {
+        entries = await this.vault.fullHistory();
+      } catch (e) {
+        listDiv.replaceChildren(
           el(
-            "span",
-            "pm-member-name",
-            member.username === me
-              ? `${member.username} (you)`
-              : member.username,
+            "p",
+            "pm-empty-note",
+            `Couldn't load the history: ${errorMessage(e)}`,
           ),
         );
-        const lastOwner = member.role === "Owner" && owners === 1;
-        if (isOwner && info.writable && !lastOwner) {
-          const roleSelect = document.createElement("select");
-          roleSelect.setAttribute("aria-label", `Role of ${member.username}`);
-          for (const role of ["Owner", "Editor"] as const)
-            roleSelect.add(new Option(role, role, false, role === member.role));
-          roleSelect.addEventListener("change", () =>
-            run("change the role", () =>
-              request("PUT", memberPath(member.username), {
-                json: { role: roleSelect.value },
-              }),
+        return;
+      }
+      listDiv.replaceChildren();
+      if (entries.length === 0)
+        listDiv.append(el("p", "pm-empty-note", "No history yet."));
+      for (const entry of [...entries].reverse()) {
+        const row = el("div", "pm-history-entry");
+        row.append(
+          el(
+            "span",
+            "pm-history-desc",
+            `${new Date(entry.timestamp).toLocaleString()} — ${describeHistoryEntry(entry)}`,
+          ),
+        );
+        listDiv.append(row);
+      }
+      listDiv.append(
+        el(
+          "p",
+          "pm-field-hint",
+          "Shows changes made while you've been a member.",
+        ),
+      );
+    }
+
+    /** How this user knows a member's identity. */
+    private verification(member: Member): { text: string; ok: boolean } {
+      const session = deps.getSession();
+      if (member.username === session?.username)
+        return { text: "you", ok: true };
+      const contact = contacts()[member.username];
+      if (contact == null) return { text: "not verified by you", ok: false };
+      if (contact.fingerprint !== member.fingerprint)
+        return { text: "⚠ not the identity you verified", ok: false };
+      return { text: "✓ verified by you", ok: true };
+    }
+
+    private renderMembers(): void {
+      const { vault } = this;
+      const canManage = vault.canManage() && !vault.removed;
+      const current = vault.latest.body.members;
+      const members = this.draft ?? current;
+      const leaving = new Set(vault.info?.leaving ?? []);
+      const session = deps.getSession();
+      this.membersDiv.replaceChildren(el("p", "pm-device-status", "Members"));
+      const ul = el("ul", "pm-member-list");
+      for (const member of members) {
+        const li = el("li");
+        li.dataset.username = member.username;
+        const { text, ok } = this.verification(member);
+        const nameSpan = el("span", "pm-member-name", member.username);
+        const badge = el(
+          "span",
+          ok ? "pm-shared-meta" : "pm-shared-meta pm-unverified",
+          text,
+        );
+        li.append(nameSpan, badge);
+        if (leaving.has(member.username))
+          li.append(el("span", "pm-shared-meta", "leaving"));
+        if (!current.some((m) => m.username === member.username))
+          li.append(el("span", "pm-shared-meta pm-member-new", "to be added"));
+        if (canManage) {
+          const write = checkbox("can edit", member.write);
+          const manage = checkbox("manages members", member.manage);
+          const update = () =>
+            this.updateDraft(member.username, {
+              write: write.querySelector("input")!.checked,
+              manage: manage.querySelector("input")!.checked,
+            });
+          write.querySelector("input")!.addEventListener("change", update);
+          manage.querySelector("input")!.addEventListener("change", update);
+          li.append(write, manage);
+          if (member.username !== session?.username) {
+            const remove = button("Remove");
+            remove.addEventListener("click", () =>
+              this.setDraft(members.filter((m) => m !== member)),
+            );
+            li.append(remove);
+          }
+        } else
+          li.append(
+            el(
+              "span",
+              "pm-shared-meta",
+              [
+                member.write ? "can edit" : "read only",
+                member.manage ? "manages members" : "",
+              ]
+                .filter(Boolean)
+                .join(", "),
             ),
           );
-          li.append(roleSelect);
-        } else li.append(el("span", "pm-shared-meta", member.role));
-        const canRemove = (isOwner || member.username === me) && !lastOwner;
-        if (canRemove) {
-          const remove = button(member.username === me ? "Leave" : "Remove");
-          remove.addEventListener("click", () => {
-            const question =
-              member.username === me
-                ? `Leave "${this.name}"? You'll need to be added again to open it.`
-                : `Remove ${member.username} from "${this.name}"? They have already seen its contents, so change any passwords they shouldn't keep using.`;
-            if (!window.confirm(question)) return;
-            void run("remove the member", () =>
-              request("DELETE", memberPath(member.username)),
-            );
-          });
-          li.append(remove);
-        }
-        members.append(li);
+        ul.append(li);
       }
-      this.manageDiv.append(members);
+      this.membersDiv.append(ul);
+      if (!canManage) return;
 
-      if (isOwner && info.writable && this.key != null)
-        this.manageDiv.append(this.addMemberForm(run, memberPath));
+      // adding: only people this user has verified
+      const candidates = Object.entries(contacts()).filter(
+        ([name]) => !members.some((m) => m.username === name),
+      );
+      const addForm = el("form", "pm-inline-form pm-add-member");
+      if (candidates.length === 0)
+        addForm.append(
+          el(
+            "p",
+            "pm-field-hint",
+            Object.keys(contacts()).length === 0
+              ? "To add someone, verify them first (under Shared Vaults above)."
+              : "Everyone you've verified is a member. To add someone else, verify them first (under Shared Vaults above).",
+          ),
+        );
+      else {
+        const select = el("select");
+        select.name = "add-member";
+        select.setAttribute("aria-label", "Person to add");
+        for (const [name] of candidates) select.add(new Option(name, name));
+        const write = checkbox("can edit", true);
+        const manage = checkbox("manages members", false);
+        const add = el("button", "pm-btn pm-btn-ghost", "Add");
+        add.type = "submit";
+        addForm.append(select, write, manage, add);
+        addForm.addEventListener("submit", (event) => {
+          event.preventDefault();
+          const contact = contacts()[select.value];
+          if (contact == null) return;
+          this.setDraft([
+            ...members,
+            {
+              username: select.value,
+              fingerprint: contact.fingerprint,
+              write: write.querySelector("input")!.checked,
+              manage: manage.querySelector("input")!.checked,
+            },
+          ]);
+        });
+      }
+      this.membersDiv.append(addForm);
 
-      if (isOwner) {
-        const actions = el("div", "pm-device-actions");
-        if (info.writable && this.key != null) {
-          const rename = button("Rename");
-          rename.addEventListener("click", () => {
-            const name = window.prompt("New name", this.name)?.trim();
-            if (!name || name === this.name || this.key == null) return;
-            const encryptedName = toBase64Url(
-              encryptBlob(this.key, encoder.encode(name)),
-            );
-            void run("rename the vault", () =>
-              request("PATCH", `/shared-vaults/${info.id}`, {
-                json: { encryptedName },
-              }),
-            );
-          });
-          actions.append(rename);
+      if (this.draft != null) {
+        const apply = button("Apply member changes", "pm-btn pm-btn-primary");
+        apply.name = "apply-members";
+        const cancel = button("Cancel");
+        cancel.addEventListener("click", () => this.setDraft(null));
+        apply.addEventListener("click", () => this.applyDraft());
+        const row = el("div", "pm-device-actions");
+        row.append(apply, cancel);
+        this.membersDiv.append(
+          el(
+            "p",
+            "pm-field-hint",
+            "Applying gives the vault a new key that only these members get, so anyone removed can't read anything saved afterwards (and anyone added can't read what was saved before).",
+          ),
+          row,
+        );
+      }
+    }
+
+    private setDraft(members: Member[] | null): void {
+      const current = this.vault.latest.body.members;
+      this.draft =
+        members != null && JSON.stringify(members) !== JSON.stringify(current)
+          ? members
+          : null;
+      this.renderMembers();
+    }
+
+    private updateDraft(
+      username: string,
+      perms: Pick<Member, "write" | "manage">,
+    ): void {
+      const members = this.draft ?? this.vault.latest.body.members;
+      this.setDraft(
+        members.map((m) => (m.username === username ? { ...m, ...perms } : m)),
+      );
+    }
+
+    private async applyDraft(): Promise<void> {
+      const draft = this.draft;
+      if (draft == null) return;
+      if (!draft.some((m) => m.manage)) {
+        this.vault.status = "⚠ Someone must still manage members.";
+        this.render();
+        return;
+      }
+      this.draft = null;
+      await this.vault.changeMembers(draft);
+    }
+
+    private renderActions(): void {
+      const { vault } = this;
+      this.actionsDiv.replaceChildren();
+      if (vault.removed) return;
+      const leave = button("Leave");
+      leave.addEventListener("click", async () => {
+        if (
+          !window.confirm(
+            `Leave "${vault.data.name}"? You'll need to be added again to open it.`,
+          )
+        )
+          return;
+        try {
+          await vault.leave();
+          removeCard(vault.id);
+        } catch (e) {
+          vault.status = `⚠ Couldn't leave: ${errorMessage(e)}`;
+          this.render();
         }
+      });
+      this.actionsDiv.append(leave);
+      if (vault.canManage()) {
         const del = button(
           "Delete shared vault",
           "pm-btn pm-btn-ghost pm-danger-text",
         );
-        del.addEventListener("click", () => {
+        del.addEventListener("click", async () => {
           if (
             !window.confirm(
-              `Delete "${this.name}" and all its tables for everyone in it? This can't be undone.`,
+              `Delete "${vault.data.name}" and all its tables for everyone in it? This can't be undone.`,
             )
           )
             return;
-          void run("delete the vault", () =>
-            request("DELETE", `/shared-vaults/${info.id}`),
-          );
+          try {
+            await vault.deleteVault();
+            removeCard(vault.id);
+          } catch (e) {
+            vault.status = `⚠ Couldn't delete: ${errorMessage(e)}`;
+            this.render();
+          }
         });
-        actions.append(del);
-        this.manageDiv.append(actions);
+        this.actionsDiv.append(del);
       }
-      this.manageDiv.append(manageStatus);
-    }
-
-    private addMemberForm(
-      run: (
-        action: string,
-        task: () => Promise<Response | null>,
-      ) => Promise<boolean>,
-      memberPath: (username: string) => string,
-    ): HTMLFormElement {
-      const form = el("form", "pm-inline-form pm-add-member");
-      const username = document.createElement("input");
-      username.name = "member-username";
-      username.placeholder = "Username to add";
-      username.autocomplete = "off";
-      username.setAttribute("aria-label", "Username to add");
-      const role = document.createElement("select");
-      role.name = "member-role";
-      role.setAttribute("aria-label", "Role");
-      role.add(new Option("Editor", "Editor", true, true));
-      role.add(new Option("Owner", "Owner"));
-      const lookup = el("button", "pm-btn pm-btn-primary", "Add member");
-      lookup.type = "submit";
-      const confirmDiv = el("div", "pm-add-member-confirm");
-      confirmDiv.hidden = true;
-      form.append(username, role, lookup, confirmDiv);
-
-      form.addEventListener("submit", async (event) => {
-        event.preventDefault();
-        const name = username.value.trim();
-        if (!name || this.key == null) return;
-        if (this.info.members.length >= this.info.maxMembers) {
-          confirmDiv.hidden = false;
-          confirmDiv.textContent = `This vault already has the maximum of ${this.info.maxMembers} members.`;
-          return;
-        }
-        lookup.disabled = true;
-        try {
-          const response = await request("GET", "/sharing-key", {
-            query: { user: name },
-          });
-          confirmDiv.hidden = false;
-          confirmDiv.replaceChildren();
-          if (response?.status === 404) {
-            confirmDiv.textContent = `No user named ${name} has set up sharing. They need to log in and choose "Set up sharing" first.`;
-            return;
-          }
-          if (response == null || !response.ok) {
-            confirmDiv.textContent = await failure(
-              response,
-              "look up the user",
-            );
-            return;
-          }
-          const { publicKey } = (await response.json()) as {
-            publicKey: string;
-          };
-          const check = el(
-            "p",
-            "pm-field-hint",
-            `${name}'s sharing key fingerprint is ${await fingerprint(publicKey)}. To be sure the vault is shared with them and no one else, check it matches the one they see under Shared Vaults.`,
-          );
-          const confirmButton = button(
-            `Add ${name} as ${role.value}`,
-            "pm-btn pm-btn-primary",
-          );
-          const cancel = button("Cancel");
-          cancel.addEventListener("click", () => {
-            confirmDiv.hidden = true;
-            confirmDiv.replaceChildren();
-          });
-          confirmButton.addEventListener("click", async () => {
-            if (this.key == null) return;
-            confirmButton.disabled = true;
-            const wrappedKey = toBase64Url(
-              sealTo(fromBase64Url(publicKey), this.key),
-            );
-            const added = await run("add the member", () =>
-              request("PUT", memberPath(name), {
-                json: { role: role.value, wrappedKey, publicKey },
-              }),
-            );
-            confirmButton.disabled = false;
-            if (added) username.value = "";
-          });
-          confirmDiv.append(check, confirmButton, cancel);
-        } finally {
-          lookup.disabled = false;
-        }
-      });
-      return form;
     }
   }
 
   return {
     show(): void {
+      renderIdentity();
+      if (deps.getSharing() == null) {
+        renderEmpty();
+        return;
+      }
       void (async () => {
-        await renderSetup();
-        if (getSharingKeys() == null) {
-          renderEmpty();
-          return;
+        await loadCached();
+        renderEmpty();
+        try {
+          const problem = await ensureIdentity();
+          if (problem) status.textContent = problem;
+        } catch (e) {
+          if (!(e instanceof OfflineError))
+            status.textContent = `⚠ ${errorMessage(e)}`;
         }
-        // publishes the key again in case that didn't finish before
-        const keys = await ensureSharingKeys();
-        if (typeof keys === "string") status.textContent = keys;
         await refresh();
       })();
     },
 
     clear(): void {
-      generation++;
+      client.reset();
       cards.clear();
+      ownFingerprint = null;
       list.replaceChildren();
+      contactsDetails.replaceChildren();
       status.textContent = "";
       intro.textContent = "";
       fingerprintLine.textContent = "";
       createName.value = "";
+      verifyName.value = "";
+      closeVerificationDialogs();
     },
 
     hasUnsavedChanges(): boolean {
+      // a remembered account's changes are kept on the device
+      if (deps.cacheAccount() != null) return false;
       for (const card of cards.values())
-        if (card.hasUnsavedChanges()) return true;
+        if (card.vault.hasUnsavedChanges()) return true;
       return false;
     },
   };

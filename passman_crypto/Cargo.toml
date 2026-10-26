@@ -11,12 +11,21 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 anyhow = "1.0.100"
 argon2 = "0.5.3"
+base64 = "0.23.1"
 chacha20poly1305 = "0.10"
-# sealed boxes (X25519 + XSalsa20-Poly1305) wrap shared vault keys for members
-crypto_box = { version = "0.9.1", features = ["seal"] }
+ed25519-dalek = "3.0.0"
+hkdf = "0.13.0"
+hybrid-array = "0.4"
+ml-dsa = "0.1.1"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+sha2 = "0.11.1"
 wasm-bindgen = "0.2"
+x-wing = { version = "0.1.1", features = ["hazmat"] }
 
 # getrandom 0.2 with "js" routes entropy through window.crypto.getRandomValues()
 # for the wasm32 target (pulled in transitively by argon2 via rand_core 0.6).
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.2", features = ["js"] }
+# the same for getrandom 0.4 (used by the sharing crates via rand_core 0.10)
+getrandom_04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }

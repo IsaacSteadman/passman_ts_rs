@@ -1,3 +1,5 @@
+pub mod sharing;
+
 use chacha20poly1305::{
     XChaCha20Poly1305, XNonce,
     aead::{Aead, AeadCore, KeyInit, OsRng},
@@ -149,66 +151,137 @@ pub fn derive_key(password: &str, salt: &[u8]) -> Result<Vec<u8>, JsError> {
     Ok(output.to_vec())
 }
 
-/// Size in bytes of an X25519 public or secret key (32).
-pub const X25519_KEY_SIZE: usize = 32;
+// ── Sharing (see `sharing`) ─────────────────────────────────────────────────
+// Thin wrappers turning errors into JS exceptions; records and versions are
+// passed as their signed bytes, and their bodies returned as JSON.
 
-/// Generates a random X25519 secret key for sharing vaults. Its public key
-/// (see [`x25519_public_key`]) is what others seal vault keys to.
+fn js_err(e: anyhow::Error) -> JsError {
+    JsError::new(&e.to_string())
+}
+
+/// Generates the secret of a new sharing identity (32 bytes).
 #[wasm_bindgen]
-pub fn x25519_generate_secret_key() -> Vec<u8> {
-    crypto_box::SecretKey::generate(&mut OsRng)
-        .to_bytes()
-        .to_vec()
+pub fn identity_generate() -> Vec<u8> {
+    sharing::generate_identity_secret().to_vec()
 }
 
-fn x25519_key(key: &[u8], what: &str) -> Result<[u8; X25519_KEY_SIZE], JsError> {
-    key.try_into().map_err(|_| {
-        JsError::new(&format!(
-            "{what} must be {X25519_KEY_SIZE} bytes, got {}",
-            key.len()
-        ))
-    })
-}
-
-/// Returns the X25519 public key of `secret_key` (32 bytes each).
+/// The public bundle of an identity secret.
 #[wasm_bindgen]
-pub fn x25519_public_key(secret_key: &[u8]) -> Result<Vec<u8>, JsError> {
-    let secret_key = crypto_box::SecretKey::from(x25519_key(secret_key, "secret key")?);
-    Ok(secret_key.public_key().as_bytes().to_vec())
+pub fn identity_bundle(secret: &[u8]) -> Result<Vec<u8>, JsError> {
+    sharing::identity_bundle(secret).map_err(js_err)
 }
 
-/// Encrypts `plaintext` so only the holder of `public_key`'s secret key can
-/// read it (a libsodium-compatible sealed box: an ephemeral X25519 key, then
-/// XSalsa20-Poly1305). The result is 48 bytes longer than `plaintext`.
 #[wasm_bindgen]
-pub fn seal(public_key: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, JsError> {
-    crypto_box::PublicKey::from(x25519_key(public_key, "public key")?)
-        .seal(&mut OsRng, plaintext)
-        .map_err(|e| JsError::new(&format!("seal error: {e}")))
+pub fn identity_fingerprint(bundle: &[u8]) -> Vec<u8> {
+    sharing::fingerprint(bundle).to_vec()
 }
 
-/// Opens a box made by [`seal`] for `secret_key`'s public key. Throws if it
-/// was sealed for another key or has been changed.
 #[wasm_bindgen]
-pub fn unseal(secret_key: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>, JsError> {
-    crypto_box::SecretKey::from(x25519_key(secret_key, "secret key")?)
-        .unseal(ciphertext)
-        .map_err(|_| JsError::new("unseal failed: sealed for another key or corrupt data"))
+pub fn safety_number(
+    user_a: &str,
+    fingerprint_a: &[u8],
+    user_b: &str,
+    fingerprint_b: &[u8],
+) -> String {
+    sharing::safety_number(user_a, fingerprint_a, user_b, fingerprint_b)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+#[wasm_bindgen]
+pub fn epoch_secret_generate() -> Vec<u8> {
+    sharing::generate_epoch_secret().to_vec()
+}
 
-    #[test]
-    fn sealed_box_opens_only_with_matching_secret_key() {
-        let secret = x25519_generate_secret_key();
-        let public = x25519_public_key(&secret).unwrap();
-        let sealed = seal(&public, b"vault key").unwrap();
-        assert_eq!(sealed.len(), b"vault key".len() + 48);
-        assert_eq!(unseal(&secret, &sealed).unwrap(), b"vault key");
-        // (directly, since a JsError can't be made outside wasm)
-        let other = crypto_box::SecretKey::generate(&mut OsRng);
-        assert!(other.unseal(&sealed).is_err());
+#[wasm_bindgen]
+pub fn epoch_subkey(epoch_secret: &[u8], label: &str) -> Vec<u8> {
+    sharing::epoch_subkey(epoch_secret, label).to_vec()
+}
+
+#[wasm_bindgen]
+pub fn epoch_key_context(vault_id: &str, seq: f64, username: &str) -> Vec<u8> {
+    sharing::epoch_key_context(vault_id, seq as u64, username)
+}
+
+#[wasm_bindgen]
+pub fn wrap_key(bundle: &[u8], key: &[u8], context: &[u8]) -> Result<Vec<u8>, JsError> {
+    sharing::wrap_key(bundle, key, context).map_err(js_err)
+}
+
+#[wasm_bindgen]
+pub fn unwrap_key(secret: &[u8], wrapped: &[u8], context: &[u8]) -> Result<Vec<u8>, JsError> {
+    sharing::unwrap_key(secret, wrapped, context)
+        .map(|k| k.to_vec())
+        .map_err(js_err)
+}
+
+/// Signs a record body (JSON of `sharing::RecordBody`).
+#[wasm_bindgen]
+pub fn record_sign(secret: &[u8], body_json: &str) -> Result<Vec<u8>, JsError> {
+    let body: sharing::RecordBody =
+        serde_json::from_str(body_json).map_err(|e| js_err(e.into()))?;
+    sharing::sign_record(secret, &body).map_err(js_err)
+}
+
+#[wasm_bindgen]
+pub fn record_hash(wire: &[u8]) -> String {
+    sharing::record_hash(wire)
+}
+
+/// Checks a record follows `prev` (empty for the first) and returns its body
+/// as JSON.
+#[wasm_bindgen]
+pub fn record_verify(prev: &[u8], wire: &[u8], author_bundle: &[u8]) -> Result<String, JsError> {
+    let prev_body = if prev.is_empty() {
+        None
+    } else {
+        Some(sharing::parse_record(prev).map_err(js_err)?)
+    };
+    let body = sharing::verify_record(prev_body.as_ref().map(|b| (b, prev)), wire, author_bundle)
+        .map_err(js_err)?;
+    serde_json::to_string(&body).map_err(|e| js_err(e.into()))
+}
+
+/// The body of a record already checked, as JSON.
+#[wasm_bindgen]
+pub fn record_body(wire: &[u8]) -> Result<String, JsError> {
+    let body = sharing::parse_record(wire).map_err(js_err)?;
+    serde_json::to_string(&body).map_err(|e| js_err(e.into()))
+}
+
+/// Signs a version body (JSON of `sharing::VersionBody`) with its contents.
+#[wasm_bindgen]
+pub fn version_sign(
+    secret: &[u8],
+    body_json: &str,
+    tables: &[u8],
+    history: &[u8],
+) -> Result<Vec<u8>, JsError> {
+    let body: sharing::VersionBody =
+        serde_json::from_str(body_json).map_err(|e| js_err(e.into()))?;
+    sharing::sign_version(secret, &body, tables, history).map_err(js_err)
+}
+
+/// Checks a version (or, if `archived`, an archived version) of the epoch
+/// started by `record`, and returns its body as JSON.
+#[wasm_bindgen]
+pub fn version_verify(
+    record: &[u8],
+    wire: &[u8],
+    author_bundle: &[u8],
+    archived: bool,
+) -> Result<String, JsError> {
+    let record = sharing::parse_record(record).map_err(js_err)?;
+    let body = if archived {
+        sharing::verify_archive(&record, wire, author_bundle)
+    } else {
+        sharing::verify_version(&record, wire, author_bundle)
     }
+    .map_err(js_err)?;
+    serde_json::to_string(&body).map_err(|e| js_err(e.into()))
+}
+
+/// SHA-256 (base64) of `data`, as used in version bodies.
+#[wasm_bindgen]
+pub fn content_hash(data: &[u8]) -> String {
+    use sha2::Digest;
+    sharing::b64_encode(&sha2::Sha256::digest(data))
 }

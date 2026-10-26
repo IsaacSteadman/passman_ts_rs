@@ -14,6 +14,8 @@ import type {
   PassTableColumn,
   PassTableData,
   PasswordCellData,
+  SharingContact,
+  SharingData,
   VaultRoot,
 } from "./PassTable";
 
@@ -292,6 +294,45 @@ function mergeHistory(
   return structuredClone(merged.slice(-HISTORY_LIMIT));
 }
 
+/** Merges the sharing identity, and the verified contacts one by one. */
+function mergeSharing(
+  base: SharingData | undefined,
+  local: SharingData | undefined,
+  remote: SharingData | undefined,
+  conflicts: string[],
+): SharingData | undefined {
+  const secret = merge3(
+    base?.identitySecret,
+    local?.identitySecret,
+    remote?.identitySecret,
+  );
+  if (secret.conflict) conflicts.push("Sharing was set up in both sessions");
+  if (secret.value == null) return undefined;
+  const contacts: Record<string, SharingContact> = {};
+  const names = new Set([
+    ...Object.keys(local?.contacts ?? {}),
+    ...Object.keys(remote?.contacts ?? {}),
+  ]);
+  for (const name of names) {
+    const contact = merge3(
+      base?.contacts[name],
+      local?.contacts[name],
+      remote?.contacts[name],
+    );
+    if (contact.conflict)
+      conflicts.push(
+        `The verification of ${name} was changed in both sessions`,
+      );
+    if (contact.value != null) contacts[name] = structuredClone(contact.value);
+  }
+  return { identitySecret: secret.value, contacts };
+}
+
+/** Whether two JSON values are equal, whatever the order of object keys. */
+export function valuesEqual(a: unknown, b: unknown): boolean {
+  return same(a, b);
+}
+
 export function mergeVaults(
   base: VaultRoot,
   local: VaultRoot,
@@ -328,15 +369,13 @@ export function mergeVaults(
     tables,
     history: mergeHistory(base.history, local.history, remote.history),
   };
-  const sharingKeys = merge3(
-    base.sharingKeys,
-    local.sharingKeys,
-    remote.sharingKeys,
+  const sharing = mergeSharing(
+    base.sharing,
+    local.sharing,
+    remote.sharing,
+    conflicts,
   );
-  if (sharingKeys.conflict)
-    conflicts.push("Sharing was set up in both sessions");
-  if (sharingKeys.value != null)
-    merged.sharingKeys = structuredClone(sharingKeys.value);
+  if (sharing != null) merged.sharing = sharing;
 
   return { merged, conflicts };
 }

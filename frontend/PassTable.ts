@@ -90,20 +90,56 @@ export type HistoryEntry =
       tableSnapshot: PassTableData;
     };
 
-/** A key pair for sharing vaults (URL-safe base64): other users seal shared
- *  vaults' keys to the public key, which is published on the server. */
-export type SharingKeys = { publicKey: string; secretKey: string };
+/** Someone whose sharing identity this user has checked in person (QR
+ *  codes) or by comparing a safety number. */
+export type SharingContact = {
+  fingerprint: string;
+  method: "qr" | "safety-number";
+  verifiedAt: string;
+};
+
+/** A user's sharing identity and the people they've verified. */
+export type SharingData = {
+  /** The identity secret (URL-safe base64), from which its key pairs are
+   *  derived; the public half is published on the server. */
+  identitySecret: string;
+  contacts: Record<string, SharingContact>;
+};
 
 export type VaultRoot = {
   tables: PassTableData[];
   history: HistoryEntry[];
   /** Only in a user's own vault, once they've set up sharing. */
-  sharingKeys?: SharingKeys;
+  sharing?: SharingData;
 };
 
 export interface PassTableCallbacks {
   onFetchBeforeEdit: () => Promise<void>;
   onAction: (entry: HistoryEntry) => Promise<void>;
+  /** Shows the table without any way to change it. */
+  readOnly?: boolean;
+}
+
+/** A one-line description of a change, for history lists. */
+export function describeHistoryEntry(entry: HistoryEntry): string {
+  switch (entry.kind) {
+    case "cell-edit":
+      return `Edited "${entry.colLabel}" in "${entry.tableName}" row ${entry.rowIndex + 1}`;
+    case "table-name":
+      return `Renamed table "${entry.previousName}" → "${entry.newName}"`;
+    case "row-add":
+      return `Added row to "${entry.tableName}"`;
+    case "row-delete":
+      return `Deleted row ${entry.rowIndex + 1} from "${entry.tableName}"`;
+    case "col-add":
+      return `Added column "${entry.colLabel}" to "${entry.tableName}"`;
+    case "col-delete":
+      return `Deleted column "${entry.colMeta.label}" from "${entry.tableName}"`;
+    case "table-add":
+      return `Added table "${entry.tableName}"`;
+    case "table-delete":
+      return `Deleted table "${entry.tableSnapshot.name}"`;
+  }
 }
 
 // ── Cell helpers ──────────────────────────────────────────────────────────────
@@ -783,7 +819,7 @@ export function renderPassTable(
 
   const nameEl = document.createElement("span");
   nameEl.className = "pm-card-name";
-  nameEl.contentEditable = "true";
+  nameEl.contentEditable = callbacks.readOnly ? "false" : "true";
   nameEl.textContent = data.name;
   nameEl.addEventListener("focus", () => {
     callbacks.onFetchBeforeEdit();
@@ -813,8 +849,9 @@ export function renderPassTable(
 
   const addColBtn = addBtn("plus", "Add Column");
   const addRowBtn = addBtn("plus", "Add Row");
-  cardHeader.append(nameEl, addColBtn, addRowBtn);
-  if (onDelete) {
+  cardHeader.append(nameEl);
+  if (!callbacks.readOnly) cardHeader.append(addColBtn, addRowBtn);
+  if (onDelete && !callbacks.readOnly) {
     const delTableBtn = iconBtn("trash", "Delete table", "pm-danger");
     delTableBtn.addEventListener("click", onDelete);
     cardHeader.appendChild(delTableBtn);
@@ -859,7 +896,7 @@ export function renderPassTable(
         colIndex: colIdx,
       });
     });
-    th.appendChild(removeBtn);
+    if (!callbacks.readOnly) th.appendChild(removeBtn);
     return th as unknown as HTMLTableCellElement;
   }
 
@@ -975,7 +1012,7 @@ export function renderPassTable(
     });
     const actTd = tr.insertCell();
     actTd.className = "pm-td-actions";
-    renderDeleteButton(actTd, data, callbacks);
+    if (!callbacks.readOnly) renderDeleteButton(actTd, data, callbacks);
 
     await callbacks.onAction({
       kind: "row-add",
@@ -1004,7 +1041,7 @@ export function renderPassTable(
       const td = tr.insertCell();
       td.className = "pm-td-data";
       renderColCell(td, col, rowIdx);
-      makeCellEditable(td, col, data, callbacks);
+      if (!callbacks.readOnly) makeCellEditable(td, col, data, callbacks);
     }
   });
 
@@ -1014,7 +1051,7 @@ export function renderPassTable(
   for (let i = 0; i < numRows; i++) {
     const actTd = tbody.rows[i].insertCell();
     actTd.className = "pm-td-actions";
-    renderDeleteButton(actTd, data, callbacks);
+    if (!callbacks.readOnly) renderDeleteButton(actTd, data, callbacks);
   }
 
   card.appendChild(table);

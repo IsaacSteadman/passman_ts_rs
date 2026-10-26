@@ -24,6 +24,24 @@ export interface CachedVault {
   pendingBlob: Uint8Array | null;
 }
 
+/** A shared vault kept on the device for a remembered account, so it can be
+ *  opened and changed offline. Records and versions are as signed by their
+ *  authors (and were checked before being stored); unsaved changes are
+ *  encrypted with the key of the epoch they were made in. */
+export interface CachedSharedVault {
+  /** `sharedVaultCacheId(account, vaultId)` */
+  id: string;
+  account: string;
+  vaultId: string;
+  /** The vault's member list records, from the first. */
+  records: Uint8Array[];
+  /** The version last downloaded from or saved to the server. */
+  synced: Uint8Array;
+  /** This device's unsaved changes: the epoch whose key encrypts them, and
+   *  the encrypted contents. */
+  pending: { epoch: number; blob: Uint8Array } | null;
+}
+
 /** What biometric unlock stores for an account (see keyProtector.ts). The
  *  shape depends on the protector, so it's opaque here. */
 export interface StoredUnlockKey {
@@ -31,10 +49,12 @@ export interface StoredUnlockKey {
 }
 
 const DB_NAME = "passman";
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 const ACCOUNTS = "accounts";
 const VAULTS = "vaults";
 const UNLOCK_KEYS = "unlockKeys";
+/** Keyed by vault, with an index on the account. */
+const SHARED_VAULTS = "sharedVaults";
 
 /** Every store holding per-account data, so forgetting an account clears all
  *  of it. */
@@ -54,6 +74,11 @@ function openDb(): Promise<IDBDatabase> {
       for (const name of ACCOUNT_STORES)
         if (!db.objectStoreNames.contains(name))
           db.createObjectStore(name, { keyPath: "id" });
+      if (!db.objectStoreNames.contains(SHARED_VAULTS))
+        db.createObjectStore(SHARED_VAULTS, { keyPath: "id" }).createIndex(
+          "account",
+          "account",
+        );
     };
     request.onsuccess = () => {
       const db = request.result;
@@ -146,10 +171,42 @@ export async function deleteUnlockKey(id: string): Promise<void> {
   });
 }
 
+export function sharedVaultCacheId(account: string, vaultId: string): string {
+  return JSON.stringify([account, vaultId]);
+}
+
+export async function listSharedVaults(
+  account: string,
+): Promise<CachedSharedVault[]> {
+  const vaults = await transaction<CachedSharedVault[]>(
+    [SHARED_VAULTS],
+    "readonly",
+    (tx) => tx.objectStore(SHARED_VAULTS).index("account").getAll(account),
+  );
+  return vaults ?? [];
+}
+
+export async function putSharedVault(vault: CachedSharedVault): Promise<void> {
+  await transaction([SHARED_VAULTS], "readwrite", (tx) => {
+    tx.objectStore(SHARED_VAULTS).put(vault);
+  });
+}
+
+export async function deleteSharedVault(id: string): Promise<void> {
+  await transaction([SHARED_VAULTS], "readwrite", (tx) => {
+    tx.objectStore(SHARED_VAULTS).delete(id);
+  });
+}
+
 /** Deletes everything this device holds for the account. */
 export async function forgetAccount(id: string): Promise<void> {
-  await transaction(ACCOUNT_STORES, "readwrite", (tx) => {
+  await transaction([...ACCOUNT_STORES, SHARED_VAULTS], "readwrite", (tx) => {
     for (const name of ACCOUNT_STORES) tx.objectStore(name).delete(id);
+    const shared = tx.objectStore(SHARED_VAULTS);
+    const keys = shared.index("account").getAllKeys(id);
+    keys.onsuccess = () => {
+      for (const key of keys.result) shared.delete(key);
+    };
   });
 }
 

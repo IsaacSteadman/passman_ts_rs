@@ -472,6 +472,31 @@
               Set up sharing
             </button>
           </div>
+          <div name="sharing-identity" class="pm-sharing-identity" hidden>
+            <p name="sharing-fingerprint" class="pm-field-hint"></p>
+            <div class="pm-device-actions">
+              <button
+                type="button"
+                name="show-my-code"
+                class="pm-btn pm-btn-ghost"
+              >
+                Show my code
+              </button>
+            </div>
+            <form name="verify-someone" class="pm-inline-form">
+              <input
+                type="text"
+                name="verify-username"
+                placeholder="Username to verify"
+                aria-label="Username to verify"
+                autocomplete="off"
+              />
+              <button type="submit" class="pm-btn pm-btn-ghost">
+                Verify someone
+              </button>
+            </form>
+            <details name="contacts" class="pm-contacts"></details>
+          </div>
           <div name="shared-list"></div>
           <form name="create-shared" class="pm-inline-form" hidden>
             <input
@@ -485,8 +510,7 @@
               Create shared vault
             </button>
           </form>
-          <p name="shared-status" class="pm-chg-pass-status"></p>
-          <p name="sharing-fingerprint" class="pm-field-hint"></p>
+          <p name="shared-status" class="pm-chg-pass-status" role="status"></p>
         </div>
 
         <!-- Password generator (moved inside #content so it only shows when logged in) -->

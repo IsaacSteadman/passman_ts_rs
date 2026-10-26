@@ -17,7 +17,7 @@ import {
   describeError,
   downloadVault,
 } from "./loginArea";
-import { mergeVaults, vaultsEqual } from "./merge";
+import { mergeVaults, valuesEqual, vaultsEqual } from "./merge";
 import {
   type VaultRoot,
   type PassTableData,
@@ -26,7 +26,8 @@ import {
   type CellValue,
   type LinkCellData,
   type PasswordCellData,
-  type SharingKeys,
+  type SharingData,
+  describeHistoryEntry,
   getDefaultCellValue,
   setCellValue,
   spliceCellValue,
@@ -45,10 +46,13 @@ export interface ContentAreaHandle {
   /** The credentials of the unlocked account, for its other server
    *  requests (shared vaults). */
   getSession(): Session | null;
-  getSharingKeys(): SharingKeys | null;
-  /** Adds the sharing keys to the vault and saves it; true once the server
-   *  has them. */
-  setSharingKeys(keys: SharingKeys): Promise<boolean>;
+  getSharing(): SharingData | null;
+  /** Replaces the sharing identity and contacts in the vault and saves it;
+   *  true once the server has the change. */
+  setSharing(sharing: SharingData): Promise<boolean>;
+  /** Whether the account is remembered on this device (so its shared vaults
+   *  are kept here too). */
+  isRemembered(): boolean;
 }
 
 export interface Session {
@@ -557,27 +561,6 @@ export function initContentArea(
   // ── History UI ────────────────────────────────────────────────────────────
   let historyDetails: HTMLDetailsElement | null = null;
 
-  function describeEntry(entry: HistoryEntry): string {
-    switch (entry.kind) {
-      case "cell-edit":
-        return `Edited "${entry.colLabel}" in "${entry.tableName}" row ${entry.rowIndex + 1}`;
-      case "table-name":
-        return `Renamed table "${entry.previousName}" → "${entry.newName}"`;
-      case "row-add":
-        return `Added row to "${entry.tableName}"`;
-      case "row-delete":
-        return `Deleted row ${entry.rowIndex + 1} from "${entry.tableName}"`;
-      case "col-add":
-        return `Added column "${entry.colLabel}" to "${entry.tableName}"`;
-      case "col-delete":
-        return `Deleted column "${entry.colMeta.label}" from "${entry.tableName}"`;
-      case "table-add":
-        return `Added table "${entry.tableName}"`;
-      case "table-delete":
-        return `Deleted table "${entry.tableSnapshot.name}"`;
-    }
-  }
-
   /** Mutates currentData to revert the entry; returns the inverse entry, or
    *  null if the entry can no longer be applied. */
   function revertEntry(entry: HistoryEntry): HistoryEntry | null {
@@ -794,7 +777,7 @@ export function initContentArea(
       const time = new Date(entry.timestamp).toLocaleTimeString();
       const text = document.createElement("span");
       text.className = "pm-history-desc";
-      text.textContent = `${time} — ${describeEntry(entry)}`;
+      text.textContent = `${time} — ${describeHistoryEntry(entry)}`;
 
       const revertBtn = document.createElement("button");
       revertBtn.className = "pm-btn pm-btn-ghost pm-history-revert";
@@ -1511,15 +1494,19 @@ export function initContentArea(
       };
     },
 
-    getSharingKeys(): SharingKeys | null {
-      return currentData?.sharingKeys ?? null;
+    getSharing(): SharingData | null {
+      return currentData?.sharing ?? null;
     },
 
-    async setSharingKeys(keys: SharingKeys): Promise<boolean> {
+    async setSharing(sharing: SharingData): Promise<boolean> {
       if (currentData == null) return false;
-      currentData.sharingKeys = keys;
+      currentData.sharing = structuredClone(sharing);
       await saveVault();
-      return baseData?.sharingKeys?.publicKey === keys.publicKey;
+      return valuesEqual(baseData?.sharing, sharing);
+    },
+
+    isRemembered(): boolean {
+      return remembered;
     },
 
     async recordChanges(entries: HistoryEntry[]): Promise<void> {

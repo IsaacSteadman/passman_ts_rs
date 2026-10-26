@@ -1,9 +1,8 @@
 use crate::{
-    server_policy::{LenAccumChecker, PolicyParams, PolicyStorage},
+    server_policy::{PolicyParams, PolicyStorage},
     shared_vaults::SharedVaults,
 };
 use actix_web::{HttpRequest, HttpResponse, http::header, web};
-use futures_util::StreamExt;
 use percent_encoding::percent_decode_str;
 use rand::{TryRngCore, rngs::OsRng};
 use serde_json::json;
@@ -485,53 +484,6 @@ const DOWNLOAD_MIN_RATE: u64 = 128 * 1024;
 
 fn download_timeout(len: u64) -> Duration {
     Duration::from_millis(len.saturating_mul(1000) / DOWNLOAD_MIN_RATE).max(DOWNLOAD_MIN_TIMEOUT)
-}
-
-/// Writes the request body to `wf`, checking it against the Content-Length
-/// (when given rather than chunked) and the policy's size limit.
-pub async fn write_payload(
-    wf: &mut WritingFile,
-    payload: &mut web::Payload,
-    content_length: Option<u64>,
-    len_checker: &mut LenAccumChecker,
-) -> Result<(), HttpResponse> {
-    if let Some(total_len) = content_length {
-        len_checker.check_len(total_len).await?;
-    }
-    let mut accum_total_len = 0u64;
-    while let Some(res) = payload.next().await {
-        let chunk = match res {
-            Ok(chunk) => chunk,
-            Err(e) => {
-                eprintln!("Error occured attempting to read payload\n  e={e:?}");
-                return Err(HttpResponse::BadRequest().json(json!({
-                    "type": "E_PAYLOAD_ERR",
-                    "message": "Failed to read request payload"
-                })));
-            }
-        };
-        accum_total_len += chunk.len() as u64;
-        match content_length {
-            Some(total_len) if accum_total_len > total_len => {
-                return Err(HttpResponse::BadRequest().json(json!({
-                    "type": "E_PAYLOAD_TOO_LARGE",
-                    "message": "request payload is larger than specified Content-Length"
-                })));
-            }
-            Some(_) => {}
-            None => len_checker.check_len(accum_total_len).await?,
-        }
-        wf.write_chunk(&chunk).await?;
-    }
-    match content_length {
-        Some(total_len) if accum_total_len != total_len => {
-            Err(HttpResponse::BadRequest().json(json!({
-                "type": "E_PAYLOAD_TOO_SMALL",
-                "message": "request payload is smaller than specified Content-Length"
-            })))
-        }
-        _ => Ok(()),
-    }
 }
 
 pub fn get_content_length(req: &HttpRequest) -> Result<Option<u64>, HttpResponse> {
