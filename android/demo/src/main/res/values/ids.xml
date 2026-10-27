@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <item name="username" type="id" />
+    <item name="password" type="id" />
+    <item name="code" type="id" />
+    <item name="sign_in" type="id" />
+    <item name="result" type="id" />
+</resources>

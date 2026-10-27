@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- SetupActivity's views -->
+    <item name="server" type="id" />
+    <item name="connect" type="id" />
+    <item name="status" type="id" />
+    <item name="pin" type="id" />
+    <item name="use_server" type="id" />
+</resources>

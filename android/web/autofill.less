@@ -1,0 +1,154 @@
+// The autofill screen's look, with the web app's colours.
+@import "../../frontend/theme.less";
+
+[hidden] {
+  display: none !important;
+}
+body {
+  margin: 0;
+  font-family: system-ui, Roboto, sans-serif;
+  font-size: 16px;
+  line-height: 1.4;
+  color: var(--pm-text);
+  background: var(--pm-bg);
+}
+main {
+  padding: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.8rem;
+  max-width: 560px;
+  margin: 0 auto;
+}
+header {
+  h1 {
+    font-size: 1.3rem;
+    margin: 0;
+  }
+  p {
+    margin: 0.2rem 0 0;
+    color: var(--pm-text-secondary);
+    overflow-wrap: anywhere;
+  }
+}
+h2 {
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--pm-text-muted);
+  margin: 0;
+}
+section {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+}
+label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: 0.9rem;
+  color: var(--pm-text-label);
+}
+input,
+select {
+  font: inherit;
+  padding: 0.55rem 0.6rem;
+  border: 1px solid var(--pm-border);
+  border-radius: 6px;
+  background: var(--pm-surface);
+  color: var(--pm-text);
+  &:focus {
+    outline: 2px solid var(--pm-focus-ring);
+    border-color: var(--pm-accent-fg);
+  }
+}
+.pm-btn {
+  padding: 0.6em 1em;
+  border-radius: 6px;
+  border: none;
+  font: inherit;
+  &.pm-btn-primary {
+    background: var(--pm-accent);
+    color: var(--pm-on-accent);
+  }
+  &.pm-btn-ghost {
+    background: transparent;
+    color: var(--pm-text-secondary);
+    border: 1px solid var(--pm-border);
+  }
+}
+.af-logins {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  &:empty {
+    display: none;
+  }
+}
+.af-login {
+  background: var(--pm-surface);
+  border: 1px solid var(--pm-border-muted);
+  border-radius: 8px;
+  padding: 0.6rem 0.7rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+.af-login-title {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  strong {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+}
+.af-badge {
+  font-size: 0.8rem;
+  padding: 0 0.45rem;
+  border-radius: 999px;
+  background: var(--pm-accent-soft);
+  color: var(--pm-accent-strong);
+  white-space: nowrap;
+  &.af-unverified {
+    background: var(--pm-alert-bg);
+    color: var(--pm-alert-text);
+  }
+}
+.af-username,
+.af-note {
+  color: var(--pm-text-secondary);
+  font-size: 0.9rem;
+  overflow-wrap: anywhere;
+  margin: 0;
+}
+.af-warning {
+  color: var(--pm-alert-text);
+}
+.af-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+#status {
+  margin: 0;
+  color: var(--pm-text-secondary);
+  &:empty {
+    display: none;
+  }
+}
+footer {
+  display: flex;
+  justify-content: flex-end;
+  border-top: 1px solid var(--pm-border-muted);
+  padding-top: 0.6rem;
+}

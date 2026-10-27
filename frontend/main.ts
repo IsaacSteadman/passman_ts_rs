@@ -14,18 +14,55 @@ import { initSharedVaultsPanel } from "./sharedVaults";
 import { accountId } from "./deviceStore";
 import { prepareForVault } from "./vaultTransfer";
 import { initTheme } from "./theme";
-import { serverUrl } from "./serverOrigin";
+import { serverFetch, serverUrl } from "./serverOrigin";
+import { callNative, nativeBridge, startNativeApp } from "./nativeApp";
 
 initTheme();
 
-if ("serviceWorker" in navigator) {
+/** Inside the Android app, which ships the app itself (see nativeApp.ts). */
+const inNativeApp = nativeBridge() != null;
+
+if (!inNativeApp && "serviceWorker" in navigator) {
   // keeps a copy of the app so it starts offline (see sw.ts)
   navigator.serviceWorker
     .register(new URL("sw.ts", import.meta.url), { type: "module" })
     .catch((e) => console.warn("Service worker registration failed", e));
 }
 
+/** Shows the Android app's server, which it lets the user change. */
+async function showNativeServer(): Promise<void> {
+  const { server, pinnedKey } = await startNativeApp();
+  const box = document.querySelector(".pm-native-server") as HTMLElement;
+  box.hidden = false;
+  box.querySelector("[name=native-server]")!.textContent = server;
+  box.querySelector("[name=native-pin]")!.textContent = pinnedKey
+    ? `Only its certificate key ${pinnedKey} is trusted.`
+    : "Any certificate trusted by Android is accepted.";
+  box
+    .querySelector("button[name=change-server]")!
+    .addEventListener("click", () => void callNative("changeServer"));
+}
+
 document.addEventListener("DOMContentLoaded", async () => {
+  for (const link of document.querySelectorAll<HTMLElement>("[data-show]"))
+    link.addEventListener("click", (event) => {
+      event.preventDefault();
+      const login = link.dataset.show === "login";
+      document.getElementById("login")!.style.display = login ? "" : "none";
+      document.getElementById("register")!.style.display = login ? "none" : "";
+    });
+  const serverPassInput = document.getElementById(
+    "server-pass-inp",
+  ) as HTMLInputElement;
+  document
+    .querySelector("input[name=show-server-pass]")!
+    .addEventListener("change", (event) => {
+      serverPassInput.type = (event.target as HTMLInputElement).checked
+        ? "text"
+        : "password";
+    });
+  if (inNativeApp) await showNativeServer();
+
   // Prefill server access params from URL query params if present
   const urlParams = new URLSearchParams(window.location.search);
   const urlServerPass = urlParams.get("server_pass");
@@ -189,7 +226,7 @@ document.addEventListener("DOMContentLoaded", async () => {
 
     let response: Response;
     try {
-      response = await fetch(url.toString(), {
+      response = await serverFetch(url, {
         method: "POST",
         headers: {
           ...credentialHeaders(authKeyB64, serverPass),

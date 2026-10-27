@@ -257,7 +257,21 @@ function pickerClosed(input: HTMLInputElement): Promise<void> {
   });
 }
 
+type FileSaver = (fileName: string, text: string, type: string) => void;
+
+let fileSaver: FileSaver | null = null;
+
+/** Replaces how exports are saved (the Android app's web view has no
+ *  downloads). */
+export function setFileSaver(saver: FileSaver): void {
+  fileSaver = saver;
+}
+
 function download(fileName: string, text: string, type: string): void {
+  if (fileSaver) {
+    fileSaver(fileName, text, type);
+    return;
+  }
   const url = URL.createObjectURL(new Blob([text], { type }));
   const link = document.createElement("a");
   link.href = url;

@@ -12,10 +12,10 @@ import {
 } from "./deviceStore";
 import { credentialHeaders } from "./loginArea";
 import { mergeVaults, valuesEqual } from "./merge";
-import type { HistoryEntry, SharingData } from "./PassTable";
+import type { HistoryEntry, SharingContact, SharingData } from "./PassTable";
 import { fromBase64Url, toBase64Url } from "./passman_crypto_glue";
 import * as sc from "./sharingCrypto";
-import { serverUrl } from "./serverOrigin";
+import { serverFetch, serverUrl } from "./serverOrigin";
 
 export interface SharingEnv {
   session(): Session | null;
@@ -138,7 +138,7 @@ export class SharingClient {
     }
     let response: Response;
     try {
-      response = await fetch(url.toString(), {
+      response = await serverFetch(url, {
         method,
         headers,
         body,
@@ -274,6 +274,21 @@ export class SharedVault {
 
   canManage(): boolean {
     return (this.me?.manage ?? false) && this.info?.writable !== false;
+  }
+
+  /** The managers other than this user whose identity isn't the one the
+   *  user verified: anyone with a user's public identity can add them to a
+   *  vault, so the UI says when it's run by someone unverified. */
+  unverifiedManagers(contacts: Record<string, SharingContact>): string[] {
+    const username = this.client.username();
+    return this.latest.body.members
+      .filter(
+        (m) =>
+          m.manage &&
+          m.username !== username &&
+          contacts[m.username]?.fingerprint !== m.fingerprint,
+      )
+      .map((m) => m.username);
   }
 
   hasUnsavedChanges(): boolean {

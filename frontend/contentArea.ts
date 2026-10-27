@@ -34,7 +34,7 @@ import {
   renderPassTable,
 } from "./PassTable";
 import { encryptBlob } from "./passman_crypto_glue";
-import { serverUrl } from "./serverOrigin";
+import { serverFetch, serverUrl } from "./serverOrigin";
 
 export interface ContentAreaHandle {
   show(result: LoginResult): void;
@@ -360,7 +360,7 @@ export function initContentArea(
 
           let response: Response;
           try {
-            response = await fetch(url.toString(), {
+            response = await serverFetch(url, {
               method: "PUT",
               headers,
               body: blob,
@@ -1134,7 +1134,7 @@ export function initContentArea(
         chgPassStatus.textContent = "Saving…";
         let response: Response;
         try {
-          response = await fetch(url.toString(), {
+          response = await serverFetch(url, {
             method: "PUT",
             headers: {
               ...credentialHeaders(oldAuthKeyB64, serverPass),

@@ -23,6 +23,7 @@
     "prestart": "npm run build:wasm",
     "build": "npx parcel build frontend/index.html",
     "build:extension": "npm run build:wasm && node scripts/build-extension.mjs",
+    "build:android": "npm run build:wasm && node scripts/build-android.mjs",
     "start": "npx parcel serve frontend/index.html",
     "test": "playwright test"
   },

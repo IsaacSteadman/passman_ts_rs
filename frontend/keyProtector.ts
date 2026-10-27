@@ -10,7 +10,8 @@
 //
 // Both layers are bound to the account id (additional authenticated data).
 // The rest of the app only uses the KeyProtector interface, so a native app
-// could keep the keys in the Secure Enclave / Android Keystore instead.
+// can keep the keys elsewhere: the Android app uses its Keystore
+// (nativeApp.ts).
 
 import {
   deleteUnlockKey,
@@ -132,7 +133,7 @@ async function innerKey(prf: Uint8Array<ArrayBuffer>): Promise<CryptoKey> {
   );
 }
 
-function encodeSecrets(secrets: UnlockSecrets): Uint8Array<ArrayBuffer> {
+export function encodeSecrets(secrets: UnlockSecrets): Uint8Array<ArrayBuffer> {
   return new TextEncoder().encode(
     JSON.stringify({
       authKeyB64: secrets.authKeyB64,
@@ -141,7 +142,7 @@ function encodeSecrets(secrets: UnlockSecrets): Uint8Array<ArrayBuffer> {
   );
 }
 
-function decodeSecrets(plaintext: ArrayBuffer): UnlockSecrets {
+export function decodeSecrets(plaintext: ArrayBuffer): UnlockSecrets {
   const parsed = JSON.parse(new TextDecoder().decode(plaintext)) as {
     authKeyB64: string;
     encryptionKey: number[];
@@ -366,4 +367,9 @@ const passkeyProtector: KeyProtector = {
   },
 };
 
-export const keyProtector: KeyProtector = passkeyProtector;
+export let keyProtector: KeyProtector = passkeyProtector;
+
+/** Replaces the protector (the Android app keeps keys in its Keystore). */
+export function setKeyProtector(protector: KeyProtector): void {
+  keyProtector = protector;
+}

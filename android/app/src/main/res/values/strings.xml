@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Passman</string>
+    <string name="autofill_fill">Fill with Passman</string>
+</resources>

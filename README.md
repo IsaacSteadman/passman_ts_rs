@@ -46,6 +46,56 @@ kept in the browser's session storage (in memory) until the browser closes,
 the computer is locked, or it goes unused for the time chosen in the popup
 (15 minutes unless changed). Open the popup with Alt+Shift+P.
 
+## Android app
+
+`android/` is an Android app (Android 11 and later) with the web app inside,
+plus what a web page can't do. `npm run build:android` builds the debug APK
+(`android/app/build/outputs/apk/debug/`); `npm run build:android -- --release`
+the release one, signed if `android/keystore.properties` names a keystore
+(`storeFile`, `storePassword`, `keyAlias`, `keyPassword`). It needs JDK 17 or
+later (`JAVA_HOME`) and the Android SDK (`ANDROID_HOME`, or `sdk.dir` in
+`android/local.properties`). On first start the app asks for the server's
+address.
+
+- **The code comes with the app.** The pages are in the APK, not loaded from
+  the server, so whoever controls the server (or its certificate) can't serve
+  a page that sends away passwords. The web view may load nothing but those
+  pages; a Content Security Policy limits them to their own scripts, and
+  they reach the network only through the app, which sends requests to the
+  server alone (`frontend/nativeApp.ts`).
+- **Certificate pinning (optional).** When choosing the server, the app shows
+  its certificate key, and can trust only that key from then on. Only the
+  certificate authorities that come with Android are trusted, not ones a user
+  or device profile installed; plain HTTP isn't allowed (except to a
+  development server in debug builds).
+- **Biometric unlock with the Android Keystore.** The account's keys are
+  encrypted with an AES key in StrongBox (or the TEE) that can't be read out,
+  can only be used right after a strong biometric check, only while the
+  device is unlocked, and is deleted by Android when fingerprints or faces are
+  added or removed. Unlike the web app's passkeys, it is never synced.
+- **Autofill.** Passman can be Android's autofill service ("Fill with
+  Passman" in apps' and browsers' login forms). The vault is only unlocked
+  after the user picks it, on Passman's own screen. A browser's word for which
+  site is open is only taken from known browsers, checked by signing
+  certificate (`scripts/update-browsers.mjs`); apps are identified by package
+  name and signing certificate, saved as `android://<hash>@<package>/` links,
+  so a lookalike app gets nothing. Linking an existing login to an app asks
+  first, saying whether the login's site lists the app as its own (Digital
+  Asset Links). After a form is sent, Passman offers to save what was typed.
+- **The screen.** No screenshots or screen recording of Passman, a blank
+  thumbnail in recent apps, and no other app's windows over it. Keyboards
+  are asked not to learn from what's typed.
+- **Clipboard.** Copied passwords and codes are marked sensitive (hidden from
+  the clipboard preview) and cleared after 45 seconds.
+- **No backups.** Nothing of Passman's goes into Android backups or
+  device-to-device transfers.
+
+`tests/android.spec.ts` runs on an emulator or device (and is skipped without
+one). It needs a screen lock and an enrolled fingerprint, which the tests
+present with `adb emu finger touch 1`, and the server on this computer
+(reached as `10.0.2.2:8080`). `android/demo` is a separate app with a login
+form for trying autofill.
+
 ## Shared vaults
 
 Users can share vaults with each other. The server only stores ciphertext and

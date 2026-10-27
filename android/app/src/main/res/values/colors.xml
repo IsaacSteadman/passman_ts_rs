@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="icon_background">#FFFFFF</color>
+    <!-- the page background of frontend/theme.less, until the page is drawn -->
+    <color name="window_background">#F3F4F6</color>
+</resources>

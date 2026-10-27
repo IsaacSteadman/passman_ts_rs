@@ -1,0 +1,79 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Passman</title>
+    <link rel="stylesheet" href="autofill.less" />
+    <script type="module" src="autofill.ts"></script>
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1>Passman</h1>
+        <p name="target"></p>
+      </header>
+
+      <section name="locked">
+        <p name="no-accounts" hidden>
+          To use autofill, open Passman and unlock your account with “Remember
+          on this device” checked.
+        </p>
+        <form name="unlock" hidden>
+          <label>
+            Account
+            <select name="account"></select>
+          </label>
+          <button
+            type="button"
+            name="biometric"
+            class="pm-btn pm-btn-primary"
+            hidden
+          >
+            Unlock with biometrics
+          </button>
+          <label>
+            Password
+            <input type="password" name="password" autocomplete="off" />
+          </label>
+          <button type="submit" name="unlock" class="pm-btn pm-btn-primary">
+            Unlock
+          </button>
+        </form>
+      </section>
+
+      <section name="fill" hidden>
+        <h2 name="list-title"></h2>
+        <ul name="logins" class="af-logins"></ul>
+        <input
+          type="search"
+          name="search"
+          placeholder="Search all logins"
+          autocomplete="off"
+        />
+        <ul name="results" class="af-logins"></ul>
+      </section>
+
+      <section name="save" hidden>
+        <p name="save-summary"></p>
+        <form name="save-login">
+          <label name="save-table-label">
+            Save in
+            <select name="save-table"></select>
+          </label>
+          <button type="submit" name="save" class="pm-btn pm-btn-primary">
+            Save
+          </button>
+        </form>
+      </section>
+
+      <p id="status" role="status"></p>
+
+      <footer>
+        <button type="button" name="close" class="pm-btn pm-btn-ghost">
+          Cancel
+        </button>
+      </footer>
+    </main>
+  </body>
+</html>

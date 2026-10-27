@@ -32,11 +32,13 @@ import { ext } from "./browserApi";
 import {
   type Login,
   NEW_TABLE,
+  loginHasTerms,
   loginMatches,
   loginTables,
   loginsIn,
   saveLogin,
-} from "./logins";
+  webSite,
+} from "../frontend/logins";
 import {
   type FillRequest,
   type FillResult,
@@ -234,16 +236,7 @@ async function refreshShared(current: StoredSession): Promise<void> {
         name: shared.data.name,
         etag: info.etag,
         tables: sealTables(shared.data.tables),
-        // anyone with a user's public identity can add them to a vault, so
-        // say when it's run by someone the user hasn't verified
-        unverifiedManagers: shared.latest.body.members
-          .filter(
-            (m) =>
-              m.manage &&
-              m.username !== current.username &&
-              sharing.contacts[m.username]?.fingerprint !== m.fingerprint,
-          )
-          .map((m) => m.username),
+        unverifiedManagers: shared.unverifiedManagers(sharing.contacts),
       });
     } catch (e) {
       problems.push(
@@ -385,16 +378,7 @@ function render(): void {
   const logins = allLogins();
   let shown: Login[];
   if (terms.length > 0) {
-    shown = logins
-      .filter((login) => {
-        const text = [login.name, login.username, ...login.urls]
-          .join("\n")
-          .normalize("NFKD")
-          .replace(/\p{M}/gu, "")
-          .toLocaleLowerCase();
-        return terms.every((term) => text.includes(term));
-      })
-      .slice(0, 50);
+    shown = logins.filter((login) => loginHasTerms(login, terms)).slice(0, 50);
     listTitle.textContent =
       shown.length > 0 ? "Search results" : "Nothing found";
   } else if (page) {
@@ -700,7 +684,7 @@ saveForm.addEventListener("submit", async (event) => {
   setStatus("Saving…");
   try {
     const login = {
-      site,
+      site: webSite(site),
       username: saveUsername.value.trim(),
       password: savePassword.value,
     };

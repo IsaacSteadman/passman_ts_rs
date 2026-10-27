@@ -226,7 +226,19 @@ function addBtn(icon: IconName, label: string): HTMLButtonElement {
   return btn;
 }
 
+let clipboardWriter: ((text: string) => void) | null = null;
+
+/** Replaces how copied text reaches the clipboard (the Android app marks it
+ *  sensitive and clears it again). */
+export function setClipboardWriter(writer: (text: string) => void): void {
+  clipboardWriter = writer;
+}
+
 export function copyTextToClipboard(text: string) {
+  if (clipboardWriter) {
+    clipboardWriter(text);
+    return;
+  }
   if (navigator.clipboard && navigator.clipboard.writeText) {
     navigator.clipboard.writeText(text);
     console.log("copy password successful");
@@ -258,6 +270,8 @@ function renderTextAreaEdit(td: HTMLTableCellElement, data: string) {
 // (javascript:, data:, …) must never be saved or rendered as a link.
 const ALLOWED_LINK_SCHEMES = [
   "http:",
+  // logins for Android apps (android://<signing key hash>@<package name>/)
+  "android:",
   "https:",
   "mailto:",
   "ftp:",

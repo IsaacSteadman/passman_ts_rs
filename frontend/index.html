@@ -119,17 +119,7 @@
         <div id="login">
           <nav class="pm-auth-tabs">
             <span class="pm-auth-tab pm-auth-tab--active">Login</span>
-            <a
-              class="pm-auth-tab"
-              href="#"
-              onclick="
-                document.getElementById('login').style.display = 'none';
-                document.getElementById('register').style.display = '';
-                return false;
-              "
-            >
-              Register
-            </a>
+            <a class="pm-auth-tab" href="#" data-show="register"> Register </a>
           </nav>
           <form method="dialog">
             <div class="pm-form-field">
@@ -212,17 +202,7 @@
         <!-- ── REGISTER ──────────────────────────────────────────── -->
         <div id="register" style="display: none">
           <nav class="pm-auth-tabs">
-            <a
-              class="pm-auth-tab"
-              href="#"
-              onclick="
-                document.getElementById('register').style.display = 'none';
-                document.getElementById('login').style.display = '';
-                return false;
-              "
-            >
-              Login
-            </a>
+            <a class="pm-auth-tab" href="#" data-show="login"> Login </a>
             <span class="pm-auth-tab pm-auth-tab--active">Register</span>
           </nav>
           <form method="dialog">
@@ -321,6 +301,21 @@
         <details class="pm-server-settings">
           <summary>Server Settings</summary>
           <div class="pm-server-settings-body">
+            <!-- the Android app's server (see nativeApp.ts) -->
+            <div class="pm-native-server" hidden>
+              <p>
+                <span class="pm-native-server-label">Server</span>
+                <span name="native-server"></span>
+              </p>
+              <p class="pm-native-pin" name="native-pin"></p>
+              <button
+                type="button"
+                name="change-server"
+                class="pm-btn pm-btn-ghost"
+              >
+                Change server
+              </button>
+            </div>
             <form id="server-access" method="dialog">
               <div class="pm-form-field">
                 <label for="server-ns-inp">Namespace</label>
@@ -335,16 +330,7 @@
                     id="server-pass-inp"
                   />
                   <label class="pm-show-toggle" title="Show / hide password">
-                    <input
-                      type="checkbox"
-                      name="show-server-pass"
-                      onchange="
-                        document.getElementById('server-pass-inp').type = this
-                          .checked
-                          ? 'text'
-                          : 'password'
-                      "
-                    />
+                    <input type="checkbox" name="show-server-pass" />
                     <svg
                       class="pm-eye-open"
                       xmlns="http://www.w3.org/2000/svg"
