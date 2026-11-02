@@ -278,17 +278,39 @@ function mergeTable(
   return { id: remote.id, name: name.value!, rowIds, columns };
 }
 
-/** Union of both sides' history (entries new since `base`), oldest first. */
+/** Identifies a history entry (for finding it in another copy of the
+ *  history). */
+export function historyKey(entry: HistoryEntry): string {
+  return canonical(entry);
+}
+
+/** `history` without `removed`'s entries. */
+export function withoutEntries(
+  history: HistoryEntry[],
+  removed: HistoryEntry[],
+): HistoryEntry[] {
+  const keys = new Set(removed.map(historyKey));
+  return history.filter((entry) => !keys.has(historyKey(entry)));
+}
+
+/** Both sides' history, oldest first: the entries new on either side since
+ *  `base`, less those deleted on either side. */
 function mergeHistory(
   base: HistoryEntry[],
   local: HistoryEntry[],
   remote: HistoryEntry[],
 ): HistoryEntry[] {
-  const known = new Set([...base, ...remote].map(canonical));
+  const keyed = (history: HistoryEntry[]) =>
+    history.map((entry) => ({ entry, key: historyKey(entry) }));
+  const l = keyed(local);
+  const r = keyed(remote);
+  const inBase = new Set(base.map(historyKey));
+  const inLocal = new Set(l.map(({ key }) => key));
+  const inRemote = new Set(r.map(({ key }) => key));
   const merged = [
-    ...remote,
-    ...local.filter((entry) => !known.has(canonical(entry))),
-  ];
+    ...r.filter(({ key }) => !inBase.has(key) || inLocal.has(key)),
+    ...l.filter(({ key }) => !inBase.has(key) && !inRemote.has(key)),
+  ].map(({ entry }) => entry);
   merged.sort((a, b) =>
     a.timestamp < b.timestamp ? -1 : a.timestamp > b.timestamp ? 1 : 0,
   );

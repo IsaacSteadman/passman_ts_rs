@@ -1249,6 +1249,54 @@ a {
   color: var(--pm-success);
 }
 
+// History lists (own vault and shared vaults)
+.pm-history-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5em;
+  padding-bottom: 0.4em;
+  margin-bottom: 0.2em;
+  border-bottom: 1px solid var(--pm-border-muted);
+  .pm-btn:disabled {
+    opacity: 0.5;
+    cursor: default;
+  }
+}
+.pm-history-select-all,
+.pm-history-pick {
+  display: flex;
+  align-items: center;
+  gap: 0.5em;
+  cursor: pointer;
+  // shift-click picks a range instead of selecting text
+  user-select: none;
+  input[type="checkbox"] {
+    margin: 0;
+    flex-shrink: 0;
+    cursor: pointer;
+  }
+}
+.pm-history-select-all {
+  font-size: 0.9em;
+  color: var(--pm-text-secondary);
+}
+.pm-history-entry {
+  display: flex;
+  align-items: center;
+  gap: 0.5em;
+  padding: 0.2em 0;
+  .pm-history-pick,
+  > .pm-history-desc {
+    flex: 1;
+    min-width: 0;
+  }
+  // lined up with the entries that have a checkbox
+  &.pm-history-fixed {
+    padding-left: calc(13px + 0.5em);
+  }
+}
+
 // Import & Export
 .pm-import-preview {
   margin: 0 0 1rem;

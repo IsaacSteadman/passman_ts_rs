@@ -235,6 +235,24 @@ test.describe("Shared vaults", () => {
     await expect(card.locator(".pm-history-list")).toContainText(
       '"New Table" → "Wifi"',
     );
+    // history from before the members changed can't be deleted
+    await expect(card.locator(".pm-history-list")).toContainText(
+      "can't be deleted",
+    );
+    await expect(card.locator(".pm-history-list input")).toHaveCount(0);
+
+    // bob deletes an entry from this epoch's history
+    const bobHistory = bobCard.locator(".pm-history-list");
+    await bobHistory
+      .locator(".pm-history-entry", { hasText: "Added table" })
+      .locator("input")
+      .check();
+    bob.page.once("dialog", (d) => d.accept());
+    await savedShared(bob.page, () =>
+      bobHistory.locator("button[name='history-delete']").click(),
+    );
+    await expect(bobHistory).not.toContainText("Added table");
+    await expect(bobHistory).toContainText('"New Table" → "From Bob"');
 
     // alice's stale session merges bob's change when she saves
     await savedShared(

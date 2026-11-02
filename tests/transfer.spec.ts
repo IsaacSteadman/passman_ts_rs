@@ -251,9 +251,9 @@ test.describe("Import & Export", () => {
     await page.click("details[name='history'] summary");
     await saved(page, () =>
       page
-        .locator(".pm-history-list > div")
+        .locator(".pm-history-entry")
         .filter({ hasText: "(imported)" })
-        .locator("button")
+        .getByRole("button", { name: "Revert" })
         .click(),
     );
     await expect(tableNames(page)).toHaveText(["Imported from chrome.csv"]);

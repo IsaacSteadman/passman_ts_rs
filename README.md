@@ -184,7 +184,9 @@ code in `passman_crypto/src/sharing.rs`, before storing it).
   server can't get anyone removed on its own.
 - **Versions** of a vault are signed by their author, who must be allowed to
   edit. Each epoch's history is kept separately (encrypted with that epoch's
-  key), so members only see the history from when they joined.
+  key), so members only see the history from when they joined. Members who
+  can edit can delete entries from the current epoch's history (as anyone
+  can from their own vault's), but not from past epochs'.
 - **Size.** What counts toward a vault's size is its encrypted tables and
   history, including past epochs' (not the signatures around them). To fit,
   the server drops the oldest past epochs' history first, then the app drops

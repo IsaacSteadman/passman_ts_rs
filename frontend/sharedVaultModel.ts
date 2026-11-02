@@ -11,7 +11,7 @@ import {
   sharedVaultCacheId,
 } from "./deviceStore";
 import { credentialHeaders } from "./loginArea";
-import { mergeVaults, valuesEqual } from "./merge";
+import { mergeVaults, valuesEqual, withoutEntries } from "./merge";
 import type { HistoryEntry, SharingContact, SharingData } from "./PassTable";
 import { fromBase64Url, toBase64Url } from "./passman_crypto_glue";
 import * as sc from "./sharingCrypto";
@@ -698,6 +698,13 @@ export class SharedVault {
     this.data.history.push(entry);
     if (this.data.history.length > HISTORY_LIMIT)
       this.data.history.splice(0, this.data.history.length - HISTORY_LIMIT);
+    return this.save();
+  }
+
+  /** Removes entries from the current epoch's history and saves (past
+   *  epochs' archived history can't be changed). */
+  deleteHistory(entries: HistoryEntry[]): Promise<void> {
+    this.data.history = withoutEntries(this.data.history, entries);
     return this.save();
   }
 

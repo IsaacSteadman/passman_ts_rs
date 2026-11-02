@@ -220,6 +220,45 @@ test.describe("mergeVaults", () => {
     ).toEqual(["a", "remote", "local"]);
   });
 
+  test("history entries deleted in either session stay deleted", () => {
+    const base = vault();
+    const entry = (timestamp: string, newName: string) => ({
+      kind: "table-name" as const,
+      timestamp,
+      tableId: "t1",
+      previousName: "Logins",
+      newName,
+    });
+    base.history = [
+      entry("2026-01-01T00:00:00Z", "a"),
+      entry("2026-01-02T00:00:00Z", "b"),
+      entry("2026-01-03T00:00:00Z", "c"),
+      entry("2026-01-04T00:00:00Z", "d"),
+    ];
+    // deleted here: b; there: c; both add one
+    const local = structuredClone(base);
+    local.history.splice(1, 1);
+    local.history.push(entry("2026-01-06T00:00:00Z", "local"));
+    const remote = structuredClone(base);
+    remote.history.splice(2, 1);
+    remote.history.push(entry("2026-01-05T00:00:00Z", "remote"));
+
+    const names = (v: VaultRoot) =>
+      v.history.map((h) => (h.kind === "table-name" ? h.newName : ""));
+    expect(names(mergeVaults(base, local, remote).merged)).toEqual([
+      "a",
+      "d",
+      "remote",
+      "local",
+    ]);
+    expect(names(mergeVaults(base, remote, local).merged)).toEqual([
+      "a",
+      "d",
+      "remote",
+      "local",
+    ]);
+  });
+
   test("the merged vault shares no objects with its inputs", () => {
     const base = vault();
     const local = vault();

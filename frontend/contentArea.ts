@@ -20,7 +20,13 @@ import {
   RollbackError,
   sealVault,
 } from "./loginArea";
-import { mergeVaults, valuesEqual, vaultsEqual } from "./merge";
+import { renderHistoryList } from "./historyList";
+import {
+  mergeVaults,
+  valuesEqual,
+  vaultsEqual,
+  withoutEntries,
+} from "./merge";
 import {
   type VaultRoot,
   type PassTableData,
@@ -30,7 +36,6 @@ import {
   type LinkCellData,
   type PasswordCellData,
   type SharingData,
-  describeHistoryEntry,
   getDefaultCellValue,
   setCellValue,
   spliceCellValue,
@@ -769,59 +774,53 @@ export function initContentArea(
     }
   }
 
-  function renderHistoryList(
-    container: HTMLElement,
-    onReverted: () => void,
-  ): void {
-    container.innerHTML = "";
-    if (!currentData || currentData.history.length === 0) {
-      const empty = document.createElement("p");
-      empty.className = "pm-empty-note";
-      empty.textContent = "No history yet.";
-      container.appendChild(empty);
-      return;
-    }
+  /** Removes entries from the history and saves. */
+  async function deleteHistoryEntries(entries: HistoryEntry[]): Promise<void> {
+    if (!currentData) return;
+    currentData.history = withoutEntries(currentData.history, entries);
+    refreshHistoryViews();
+    await saveVault();
+  }
 
-    [...currentData.history].reverse().forEach((entry) => {
-      const row = document.createElement("div");
-      row.className = "pm-history-entry";
+  /** Undoes an entry's change and saves; false if it no longer applies. */
+  async function revertHistoryEntry(entry: HistoryEntry): Promise<boolean> {
+    const inverse = revertEntry(entry);
+    if (inverse === null) return false;
+    currentData!.history.push(inverse);
+    if (currentData!.history.length > 100)
+      currentData!.history.splice(0, currentData!.history.length - 100);
+    await saveVault();
+    render();
+    refreshHistoryViews();
+    return true;
+  }
 
-      const time = new Date(entry.timestamp).toLocaleTimeString();
-      const text = document.createElement("span");
-      text.className = "pm-history-desc";
-      text.textContent = `${time} — ${describeHistoryEntry(entry)}`;
-
-      const revertBtn = document.createElement("button");
-      revertBtn.className = "pm-btn pm-btn-ghost pm-history-revert";
-      revertBtn.textContent = "Revert";
-      revertBtn.addEventListener("click", async () => {
-        const inverse = revertEntry(entry);
-        if (inverse === null) {
-          revertBtn.textContent = "No longer applicable";
-          revertBtn.disabled = true;
-          return;
-        }
-        currentData!.history.push(inverse);
-        if (currentData!.history.length > 100)
-          currentData!.history.splice(0, currentData!.history.length - 100);
-        await saveVault();
-        render();
-        onReverted();
-      });
-
-      row.append(text, revertBtn);
-      container.appendChild(row);
+  function fillHistoryList(list: HTMLElement): void {
+    renderHistoryList(list, {
+      entries: currentData?.history ?? [],
+      onDelete: deleteHistoryEntries,
+      onRevert: revertHistoryEntry,
     });
   }
 
-  function rerenderHistoryUI(): void {
-    if (!historyDetails || !currentData) return;
-    const summary = historyDetails.querySelector("summary")!;
-    summary.textContent = `History (${currentData.history.length} entries)`;
-    const list = historyDetails.querySelector(
-      ".pm-history-list",
-    ) as HTMLElement;
-    renderHistoryList(list, () => {});
+  function historyTitle(): string {
+    return `History (${currentData?.history.length ?? 0} entries)`;
+  }
+
+  /** Redraws the history panel (if open) and dialog (if shown). */
+  function refreshHistoryViews(): void {
+    if (historyDetails && currentData) {
+      historyDetails.querySelector("summary")!.textContent = historyTitle();
+      if (historyDetails.open)
+        fillHistoryList(
+          historyDetails.querySelector(".pm-history-list") as HTMLElement,
+        );
+    }
+    const modal = document.getElementById("pm-history-modal");
+    if (modal) {
+      modal.querySelector("h3")!.textContent = historyTitle();
+      fillHistoryList(modal.querySelector(".pm-history-list") as HTMLElement);
+    }
   }
 
   function showHistoryModal(): void {
@@ -839,15 +838,11 @@ export function initContentArea(
     modal.style.cssText = "max-height:80vh;overflow-y:auto;min-width:480px";
 
     const title = document.createElement("h3");
-    title.textContent = `History (${currentData?.history.length ?? 0} entries)`;
+    title.textContent = historyTitle();
 
     const list = document.createElement("div");
     list.className = "pm-history-list";
-    renderHistoryList(list, () => {
-      // Update modal title after revert
-      title.textContent = `History (${currentData?.history.length ?? 0} entries)`;
-      renderHistoryList(list, () => {});
-    });
+    fillHistoryList(list);
 
     const footer = document.createElement("div");
     footer.className = "pm-modal-footer";
@@ -878,7 +873,7 @@ export function initContentArea(
       if (currentData.history.length > 100)
         currentData.history.splice(0, currentData.history.length - 100);
       await saveVault();
-      rerenderHistoryUI();
+      refreshHistoryViews();
     },
   };
 
@@ -959,12 +954,12 @@ export function initContentArea(
     details.className = "pm-history-details";
     details.style.marginTop = "1.5em";
     const summary = document.createElement("summary");
-    summary.textContent = `History (${currentData.history.length} entries)`;
+    summary.textContent = historyTitle();
     const list = document.createElement("div");
     list.className = "pm-history-list";
     list.style.cssText = "margin-top:0.5em";
     details.addEventListener("toggle", () => {
-      if (details.open) renderHistoryList(list, () => {});
+      if (details.open) fillHistoryList(list);
     });
     details.append(summary, list);
     dataDiv.appendChild(details);

@@ -188,3 +188,93 @@ test.describe("Vault contents", () => {
     await expect(page.locator("#login-password")).toHaveValue("");
   });
 });
+
+test.describe("History", () => {
+  const history = (page: Page) =>
+    page.locator("details[name='history'] .pm-history-list");
+  const entry = (page: Page, text: string) =>
+    history(page).locator(".pm-history-entry", { hasText: text });
+
+  test("entries in the middle of the history can be deleted", async ({
+    page,
+  }) => {
+    const username = uniqueUsername();
+    await register(page, username);
+    await login(page, username);
+    await addTable(page);
+    for (const name of ["One", "Two", "Three"])
+      await saved(page, () => renameTable(page, 0, name));
+
+    await page.click("details[name='history'] summary");
+    const descriptions = history(page).locator(".pm-history-desc");
+    await expect(descriptions).toHaveCount(4);
+    const deleteButton = history(page).locator(
+      "button[name='history-delete']",
+    );
+    await expect(deleteButton).toBeDisabled();
+
+    // the two renames in the middle: a click, then a shift-click on the
+    // other entry's text picks the range
+    await entry(page, '"One" → "Two"').locator("input").click();
+    await entry(page, '"New Table" → "One"')
+      .locator(".pm-history-desc")
+      .click({ modifiers: ["Shift"] });
+    await expect(deleteButton).toHaveText("Delete 2 entries");
+    await expect(
+      history(page).locator("input[name='history-select-all']"),
+    ).toHaveJSProperty("indeterminate", true);
+
+    // cancelling keeps them
+    page.once("dialog", (dialog) => dialog.dismiss());
+    await deleteButton.click();
+    await expect(descriptions).toHaveCount(4);
+
+    page.once("dialog", (dialog) => dialog.accept());
+    await saved(page, () => deleteButton.click());
+    await expect(descriptions).toHaveCount(2);
+    await expect(descriptions.nth(0)).toContainText('"Two" → "Three"');
+    await expect(descriptions.nth(1)).toContainText('Added table "New Table"');
+    await expect(page.locator("details[name='history'] summary")).toHaveText(
+      "History (2 entries)",
+    );
+    // the table is as it was
+    await expect(tableNames(page)).toHaveText(["Three"]);
+
+    // which was saved
+    await page.click("button[name='logout']");
+    await login(page, username);
+    await page.click("details[name='history'] summary");
+    await expect(descriptions).toHaveCount(2);
+    await expect(history(page)).not.toContainText('"One"');
+
+    // and what's left can still be reverted
+    await saved(page, () =>
+      entry(page, '"Two" → "Three"')
+        .getByRole("button", { name: "Revert" })
+        .click(),
+    );
+    await expect(tableNames(page)).toHaveText(["Two"]);
+  });
+
+  test("the History dialog can delete every entry", async ({ page }) => {
+    const username = uniqueUsername();
+    await register(page, username);
+    await login(page, username);
+    await addTable(page);
+    await saved(page, () => renameTable(page, 0, "Bank"));
+
+    await page.click("button[name='history']");
+    const dialog = page.locator("#pm-history-modal");
+    await expect(dialog.locator("h3")).toHaveText("History (2 entries)");
+    await dialog.locator("input[name='history-select-all']").check();
+    page.once("dialog", (d) => d.accept());
+    await saved(page, () =>
+      dialog.locator("button[name='history-delete']").click(),
+    );
+    await expect(dialog.locator("h3")).toHaveText("History (0 entries)");
+    await expect(dialog.locator(".pm-history-list")).toContainText(
+      "No history yet.",
+    );
+    await expect(tableNames(page)).toHaveText(["Bank"]);
+  });
+});

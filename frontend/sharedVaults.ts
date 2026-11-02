@@ -10,9 +10,10 @@ import {
   type PassTableData,
   type SharingContact,
   type SharingData,
-  describeHistoryEntry,
   renderPassTable,
 } from "./PassTable";
+import { renderHistoryList } from "./historyList";
+import { historyKey, withoutEntries } from "./merge";
 import {
   OfflineError,
   ServerError,
@@ -790,27 +791,35 @@ export function initSharedVaultsPanel(
         );
         return;
       }
-      listDiv.replaceChildren();
-      if (entries.length === 0)
-        listDiv.append(el("p", "pm-empty-note", "No history yet."));
-      for (const entry of [...entries].reverse()) {
-        const row = el("div", "pm-history-entry");
-        row.append(
-          el(
-            "span",
-            "pm-history-desc",
-            `${new Date(entry.timestamp).toLocaleString()} — ${describeHistoryEntry(entry)}`,
-          ),
-        );
-        listDiv.append(row);
-      }
-      listDiv.append(
-        el(
-          "p",
-          "pm-field-hint",
+      this.drawHistory(listDiv, entries);
+    }
+
+    /** `entries`: the archived history then the current epoch's. Only the
+     *  current epoch's can be deleted. */
+    private drawHistory(listDiv: HTMLElement, entries: HistoryEntry[]): void {
+      const { vault } = this;
+      const current = new Set(vault.data.history.map(historyKey));
+      const editable = vault.canWrite() && !vault.removed;
+      const archived = entries.some((e) => !current.has(historyKey(e)));
+      renderHistoryList(listDiv, {
+        entries,
+        onDelete: editable
+          ? async (picked) => {
+              const saved = vault.deleteHistory(picked);
+              this.drawHistory(listDiv, withoutEntries(entries, picked));
+              await saved;
+            }
+          : undefined,
+        canDelete: (entry) => current.has(historyKey(entry)),
+        hint: [
           "Shows changes made while you've been a member.",
-        ),
-      );
+          editable && archived
+            ? "Changes from before the members last changed can't be deleted."
+            : "",
+        ]
+          .filter(Boolean)
+          .join(" "),
+      });
     }
 
     /** How this user knows a member's identity. */
