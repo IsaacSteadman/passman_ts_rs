@@ -69,12 +69,11 @@ pub async fn route(
                 read_file,
                 read_guard,
                 user_path,
-                argon2,
                 ..
             },
         write_file_path,
     } = match app_state
-        .get_will_mut_user(&username, &old_auth_key, AUTH_KEY_HEADER)
+        .get_will_mut_user(&req, &username, &old_auth_key, AUTH_KEY_HEADER)
         .await
     {
         Err(e) => return e,
@@ -96,15 +95,7 @@ pub async fn route(
     if let Err(e) = check_if_match(&if_match, &current_etag) {
         return e;
     }
-    let udh = match UserDataHeader::from_password(&new_password, &argon2).await {
-        Err(e) => {
-            eprintln!(
-                "Error occured attempting to create new UserDataHeader from password\n  username={username:?}\n  e={e:?}"
-            );
-            return HttpResponse::InternalServerError().finish();
-        }
-        Ok(o) => o,
-    };
+    let udh = UserDataHeader::from_auth_key(&new_password);
     let write_guard = match OwnedRwLockReadGuard::upgrade(read_guard).await {
         Err(_) => {
             eprintln!(

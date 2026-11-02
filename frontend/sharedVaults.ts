@@ -18,8 +18,10 @@ import {
   ServerError,
   SharedVault,
   SharingClient,
+  formatSize,
 } from "./sharedVaultModel";
 import {
+  DEFAULT_MIN_HISTORY,
   type Member,
   fingerprintOf,
   formatFingerprint,
@@ -80,12 +82,6 @@ function checkbox(label: string, checked: boolean): HTMLLabelElement {
   input.checked = checked;
   wrap.append(input, document.createTextNode(label));
   return wrap;
-}
-
-function formatSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
 function errorMessage(e: unknown): string {
@@ -248,9 +244,13 @@ export function initSharedVaultsPanel(
     if (session && fingerprint) showMyCode(session.username, fingerprint);
   });
 
-  verifyForm.addEventListener("submit", async (event) => {
+  verifyForm.addEventListener("submit", (event) => {
     event.preventDefault();
-    const name = verifyName.value.trim();
+    void startVerifying(verifyName.value.trim());
+  });
+
+  /** Looks `name` up and opens the dialog for verifying them. */
+  async function startVerifying(name: string): Promise<void> {
     const session = deps.getSession();
     const fingerprint = myFingerprint();
     if (!name || session == null || fingerprint == null) return;
@@ -286,7 +286,7 @@ export function initSharedVaultsPanel(
         for (const card of cards.values()) card.render();
       },
     });
-  });
+  }
 
   // ── Vaults ────────────────────────────────────────────────────────────────
 
@@ -392,6 +392,7 @@ export function initSharedVaultsPanel(
       const vault = await SharedVault.create(client, name);
       createName.value = "";
       status.textContent = "";
+      await accept(vault);
       addCard(vault, true);
       await refresh();
     } catch (e) {
@@ -400,6 +401,19 @@ export function initSharedVaultsPanel(
       submit.disabled = false;
     }
   });
+
+  /** Records in the user's own vault that they accepted `vault` (so it's
+   *  used from now on); false if that couldn't be saved. */
+  async function accept(vault: SharedVault): Promise<boolean> {
+    const sharing = deps.getSharing();
+    if (sharing == null) return false;
+    const saved = await deps.setSharing({
+      ...sharing,
+      accepted: { ...sharing.accepted, [vault.id]: vault.latest.body.seq },
+    });
+    vault.refreshPending();
+    return saved;
+  }
 
   // ── One vault ─────────────────────────────────────────────────────────────
 
@@ -412,6 +426,7 @@ export function initSharedVaultsPanel(
     private readonly tablesDiv = el("div", "pm-shared-tables");
     private readonly historyDetails = el("details", "pm-history-details");
     private readonly membersDiv = el("div", "pm-device-subsection");
+    private readonly settingsDiv = el("div", "pm-device-subsection");
     private readonly actionsDiv = el("div", "pm-device-actions");
     /** What the tables were last drawn from, so they're only redrawn (which
      *  would end an edit in progress) when that changes. */
@@ -432,6 +447,7 @@ export function initSharedVaultsPanel(
         this.noticeDiv,
         this.tablesDiv,
         this.historyDetails,
+        this.settingsDiv,
         this.membersDiv,
         this.actionsDiv,
       );
@@ -446,6 +462,14 @@ export function initSharedVaultsPanel(
         removeCard(vault.id);
         return;
       }
+      this.details.classList.toggle("pm-invitation", vault.pending);
+      if (vault.pending) {
+        this.renderInvitation();
+        return;
+      }
+      this.historyDetails.hidden = false;
+      this.settingsDiv.hidden = false;
+      this.noticeDiv.querySelector(".pm-invitation-intro")?.remove();
       const me = vault.me;
       const members = vault.latest.body.members;
       this.summaryName.textContent = vault.data.name;
@@ -467,9 +491,7 @@ export function initSharedVaultsPanel(
       const usage =
         info == null
           ? ""
-          : info.maxDataSize == null
-            ? `Uses ${formatSize(info.size)}.`
-            : `Uses ${formatSize(info.size)} of ${formatSize(info.maxDataSize)}.`;
+          : `Uses ${formatSize(vault.planStorage().usage)} of ${formatSize(info.maxDataSize)}.`;
       const readOnlyNote =
         info?.writable === false
           ? " The server no longer allows changes to this vault."
@@ -488,7 +510,111 @@ export function initSharedVaultsPanel(
         this.drawn = { data: vault.data, readOnly };
       }
       this.renderMembers();
+      this.renderSettings();
       this.renderActions();
+    }
+
+    /** An invitation: who added the user, the members and whether they're
+     *  verified, and Accept (only once the inviter is verified) or Decline.
+     *  Its contents aren't shown or used until it's accepted. */
+    private renderInvitation(): void {
+      const { vault } = this;
+      const inviter = vault.inviter();
+      this.summaryName.textContent = vault.data.name;
+      this.summaryMeta.textContent = `Invitation${inviter ? ` from ${inviter.username}` : ""}`;
+      this.statusLine.textContent = vault.status;
+      this.noticeDiv.replaceChildren();
+      this.tablesDiv.replaceChildren();
+      this.drawn = null;
+      this.historyDetails.hidden = true;
+      this.settingsDiv.hidden = true;
+      this.renderMembers();
+
+      const verified =
+        inviter != null &&
+        contacts()[inviter.username]?.fingerprint === inviter.fingerprint;
+      const intro = el(
+        "p",
+        "pm-device-status pm-invitation-intro",
+        inviter
+          ? `${inviter.username} added you to this shared vault. Its tables aren't shown or used until you accept.`
+          : "You were added to this shared vault.",
+      );
+      const acceptButton = button("Accept", "pm-btn pm-btn-primary");
+      acceptButton.name = "accept-invitation";
+      acceptButton.disabled = !verified;
+      acceptButton.addEventListener("click", async () => {
+        acceptButton.disabled = true;
+        if (await accept(vault)) {
+          vault.persist();
+          if (vault.info) void vault.sync(vault.info);
+        } else
+          vault.status =
+            "⚠ Couldn't save that you accepted it to your vault; try again.";
+        this.render();
+      });
+      const decline = button("Decline");
+      decline.name = "decline-invitation";
+      decline.addEventListener("click", async () => {
+        if (!window.confirm(`Decline "${vault.data.name}"?`)) return;
+        try {
+          await vault.leave();
+          removeCard(vault.id);
+        } catch (e) {
+          vault.status = `⚠ Couldn't decline: ${errorMessage(e)}`;
+          this.render();
+        }
+      });
+      this.actionsDiv.replaceChildren(acceptButton, decline);
+      if (!verified && inviter) {
+        const note = el(
+          "p",
+          "pm-conflict pm-unverified-managers",
+          contacts()[inviter.username] != null
+            ? `⚠ ${inviter.username} added you with an identity other than the one you verified. Verify them again before accepting: it could be someone else (even the server) posing as them.`
+            : `To accept, first verify ${inviter.username}'s identity (in person or on a call), so you know it's really them.`,
+        );
+        const verify = button(`Verify ${inviter.username}`);
+        verify.addEventListener(
+          "click",
+          () => void startVerifying(inviter.username),
+        );
+        this.actionsDiv.append(note, verify);
+      }
+      this.noticeDiv.append(intro);
+    }
+
+    /** The vault's settings, for those who can edit it. */
+    private renderSettings(): void {
+      const { vault } = this;
+      this.settingsDiv.replaceChildren();
+      if (!vault.canWrite() || vault.removed) return;
+      const form = el("form", "pm-inline-form");
+      const label = el(
+        "label",
+        "pm-field-hint",
+        "When making room, keep at least ",
+      );
+      const input = el("input");
+      input.type = "number";
+      input.name = "min-history";
+      input.min = "0";
+      input.max = "100";
+      input.value = String(vault.data.minHistory ?? DEFAULT_MIN_HISTORY);
+      input.setAttribute("aria-label", "Minimum history entries kept");
+      label.append(input, document.createTextNode(" history entries"));
+      form.append(label);
+      input.addEventListener("change", () => {
+        const n = Math.round(Number(input.value));
+        if (!Number.isFinite(n) || n < 0 || n > 100) {
+          input.value = String(vault.data.minHistory ?? DEFAULT_MIN_HISTORY);
+          return;
+        }
+        vault.data.minHistory = n;
+        void vault.save();
+      });
+      form.addEventListener("submit", (event) => event.preventDefault());
+      this.settingsDiv.append(form);
     }
 
     private renderNotices(): void {
@@ -528,6 +654,34 @@ export function initSharedVaultsPanel(
             `⚠ This vault is managed by ${names}, whose identity you haven't verified. Verify them before trusting it with new passwords: otherwise it could be someone else (even the server) posing as them.`,
           ),
         );
+      }
+      this.noticeDiv.querySelector(".pm-storage")?.remove();
+      const plan = vault.planStorage();
+      if (vault.canWrite() && plan.max != null) {
+        let text: string | null = null;
+        if (plan.over > 0)
+          text = `⚠ This vault is ${formatSize(plan.over)} over its ${formatSize(plan.max)} limit, even keeping only the newest ${vault.data.minHistory ?? DEFAULT_MIN_HISTORY} history entries, so changes can't be saved. Remove something, or keep less history.`;
+        else if (plan.droppedArchives.length > 0 || plan.trimmedEntries > 0) {
+          const parts = [];
+          if (plan.droppedArchives.length > 0)
+            parts.push(
+              `the history from before ${vault.epochDate(plan.droppedArchives[plan.droppedArchives.length - 1] + 1)}`,
+            );
+          if (plan.trimmedEntries > 0)
+            parts.push(
+              `the ${plan.trimmedEntries} oldest history ${plan.trimmedEntries === 1 ? "entry" : "entries"}`,
+            );
+          text = `⚠ This vault is near its ${formatSize(plan.max)} limit: saving deletes ${parts.join(" and ")} to make room.`;
+        } else if (plan.usage > plan.max * 0.8)
+          text = `This vault uses ${formatSize(plan.usage)} of its ${formatSize(plan.max)}; when it's full, the oldest history is deleted to make room.`;
+        if (text != null)
+          this.noticeDiv.append(
+            el(
+              "p",
+              `pm-conflict pm-storage${plan.over > 0 ? "" : " pm-storage-note"}`,
+              text,
+            ),
+          );
       }
       this.noticeDiv.querySelector(".pm-stranded")?.remove();
       if (vault.stranded) {
@@ -673,10 +827,10 @@ export function initSharedVaultsPanel(
 
     private renderMembers(): void {
       const { vault } = this;
-      const canManage = vault.canManage() && !vault.removed;
+      const canManage = vault.canManage() && !vault.removed && !vault.pending;
       const current = vault.latest.body.members;
       const members = this.draft ?? current;
-      const leaving = new Set(vault.info?.leaving ?? []);
+      const leaving = new Set(vault.leaving);
       const session = deps.getSession();
       this.membersDiv.replaceChildren(el("p", "pm-device-status", "Members"));
       const ul = el("ul", "pm-member-list");
@@ -819,6 +973,23 @@ export function initSharedVaultsPanel(
         this.render();
         return;
       }
+      const plan = this.vault.planMemberChange();
+      const lost = [];
+      if (plan.droppedRecords > 0)
+        lost.push(
+          `its oldest member list change (it keeps the last ${this.vault.info?.maxRecords})`,
+        );
+      if (plan.droppedEpochs.length > 0)
+        lost.push(
+          `the history from before ${this.vault.epochDate(plan.droppedEpochs[plan.droppedEpochs.length - 1] + 1)}`,
+        );
+      if (
+        lost.length > 0 &&
+        !window.confirm(
+          `Changing the members of "${this.vault.data.name}" deletes ${lost.join(" and ")}. Continue?`,
+        )
+      )
+        return;
       this.draft = null;
       await this.vault.changeMembers(draft);
     }

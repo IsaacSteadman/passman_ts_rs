@@ -4,22 +4,35 @@
 //! visible: one they aren't a member of is "not found", whether or not it
 //! exists. Members' browsers check everything they download themselves; the
 //! server checks it too before storing it.
+//!
+//! No lock is held while waiting for a client: uploads are read before the
+//! vault is locked, downloads are opened under the lock and streamed after
+//! it's released, and listing reads the registry rather than each vault.
 
 use crate::{
     routes::base::{
         AUTH_KEY_HEADER, AppState, auth_key_header, check_if_match, get_content_length,
-        policy_params, required_if_match, streaming_download, validate_username,
+        http_date_from_millis, policy_params, required_if_match, streaming_download,
+        validate_username,
     },
-    server_policy::SharedVaultLimits,
-    shared_vaults::{VaultMeta, VaultState, valid_id},
+    server_policy::VaultLimits,
+    shared_vaults::{
+        ReserveError, Summary, VaultLock, VaultMeta, VaultState, valid_id, version_etag,
+    },
 };
-use actix_web::{HttpRequest, HttpResponse, Responder, delete, get, http::header, post, put, web};
+use actix_web::{
+    HttpRequest, HttpResponse, Responder, delete, get, http::StatusCode, http::header, post, put,
+    web,
+};
 use futures_util::StreamExt;
 use passman_crypto::sharing::{self, RecordBody, VersionBody};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::sync::Arc;
-use tokio::sync::RwLock;
+use std::{
+    sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
+};
+use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard, OwnedSemaphorePermit};
 
 pub fn configure(cfg: &mut web::ServiceConfig) {
     cfg.service(get_identity)
@@ -41,31 +54,39 @@ struct UserParams {
     server_ns: Option<String>,
 }
 
-/// The largest upload for a vault without a size limit.
-const MAX_UPLOAD: u64 = 64 * 1024 * 1024;
+/// The most a version's signature, body and framing add to its encrypted
+/// contents (about 3.7 KB; the body's fields are bounded and canonical).
+const VERSION_OVERHEAD_MAX: u64 = 8 * 1024;
+/// The largest leave statement.
+const MAX_STATEMENT: u64 = 8 * 1024;
+/// Signed times may be at most this far ahead of the server's clock.
+const MAX_CLOCK_AHEAD_MS: u64 = 24 * 60 * 60 * 1000;
 
-fn error(status: actix_web::http::StatusCode, type_: &str, message: &str) -> HttpResponse {
+/// The largest record of a vault with at most `max_members` members: the
+/// signature and body, and each member's entry and wrapped key.
+fn record_max_len(max_members: u32) -> u64 {
+    8 * 1024 + max_members as u64 * 3 * 1024
+}
+
+/// The largest version of a vault whose contents may be `max_data_size`.
+fn version_max_len(limits: &VaultLimits) -> u64 {
+    limits.max_data_size + VERSION_OVERHEAD_MAX
+}
+
+fn error(status: StatusCode, type_: &str, message: &str) -> HttpResponse {
     HttpResponse::build(status).json(json!({ "type": type_, "message": message }))
 }
 
 fn not_found() -> HttpResponse {
-    error(
-        actix_web::http::StatusCode::NOT_FOUND,
-        "E_NOT_FOUND",
-        "no such shared vault",
-    )
+    error(StatusCode::NOT_FOUND, "E_NOT_FOUND", "no such shared vault")
 }
 
 fn forbidden(message: &str) -> HttpResponse {
-    error(
-        actix_web::http::StatusCode::FORBIDDEN,
-        "E_FORBIDDEN",
-        message,
-    )
+    error(StatusCode::FORBIDDEN, "E_FORBIDDEN", message)
 }
 
 fn conflict(type_: &str, message: &str) -> HttpResponse {
-    error(actix_web::http::StatusCode::CONFLICT, type_, message)
+    error(StatusCode::CONFLICT, type_, message)
 }
 
 /// Something a member's browser would refuse too.
@@ -100,6 +121,28 @@ fn read_only_error() -> HttpResponse {
     )
 }
 
+fn too_large(max: u64) -> HttpResponse {
+    policy_error(
+        "update_shared_vault",
+        format!("the shared vault's contents would be larger than its maximum size {max}"),
+    )
+}
+
+/// Refuses a signed time too far in the future (it would also show
+/// wrongly to everyone else).
+fn check_time(millis: u64) -> Result<(), HttpResponse> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    if millis > now.saturating_add(MAX_CLOCK_AHEAD_MS) {
+        return Err(invalid(anyhow::anyhow!(
+            "the time it was made is in the future; check this device's clock"
+        )));
+    }
+    Ok(())
+}
+
 /// Checks the server access credentials and the user's password.
 async fn authenticate(
     app_state: &AppState,
@@ -113,28 +156,55 @@ async fn authenticate(
         .read_account_server_policy_auth(policy)
         .await?;
     app_state
-        .get_user(&params.username, &auth_key, AUTH_KEY_HEADER)
+        .get_user(req, &params.username, &auth_key, AUTH_KEY_HEADER)
         .await?;
     Ok(())
 }
 
-/// Reads the whole request body, refusing more than `max` bytes.
+/// A request body held in memory, counted against the server's budget for
+/// that until it's dropped.
+struct Body {
+    data: Vec<u8>,
+    _permit: OwnedSemaphorePermit,
+}
+
+/// Reads the whole request body, refusing more than `max` bytes. A
+/// `Content-Length` is required, and memory for it is reserved up front:
+/// when too many uploads are in progress, this one is refused (503).
 async fn read_body(
+    app_state: &AppState,
     req: &HttpRequest,
     payload: &mut web::Payload,
     max: u64,
-) -> Result<Vec<u8>, HttpResponse> {
-    let too_large = || {
-        policy_error(
-            "update_shared_vault",
-            format!("the shared vault would be larger than its maximum size {max}"),
-        )
+) -> Result<Body, HttpResponse> {
+    let Some(len) = get_content_length(req)? else {
+        return Err(HttpResponse::LengthRequired().json(json!({
+            "type": "E_LENGTH_REQUIRED",
+            "message": "a Content-Length is required"
+        })));
     };
-    let content_length = get_content_length(req)?;
-    if content_length.is_some_and(|len| len > max) {
-        return Err(too_large());
+    if len > max {
+        return Err(too_large(max));
     }
-    let mut body = Vec::with_capacity(content_length.unwrap_or(0) as usize);
+    let kib = len.div_ceil(1024).max(1);
+    let permit = u32::try_from(kib)
+        .ok()
+        .and_then(|kib| {
+            app_state
+                .upload_budget
+                .clone()
+                .try_acquire_many_owned(kib)
+                .ok()
+        })
+        .ok_or_else(|| {
+            HttpResponse::ServiceUnavailable()
+                .insert_header((header::RETRY_AFTER, "5"))
+                .json(json!({
+                    "type": "E_BUSY",
+                    "message": "the server is busy; try again shortly"
+                }))
+        })?;
+    let mut data = Vec::with_capacity(len as usize);
     while let Some(chunk) = payload.next().await {
         let chunk = chunk.map_err(|e| {
             eprintln!("Error occured attempting to read payload\n  e={e:?}");
@@ -143,33 +213,21 @@ async fn read_body(
                 "message": "Failed to read request payload"
             }))
         })?;
-        body.extend_from_slice(&chunk);
-        if body.len() as u64 > max {
-            return Err(too_large());
+        if (data.len() + chunk.len()) as u64 > len {
+            break;
         }
+        data.extend_from_slice(&chunk);
     }
-    if content_length.is_some_and(|len| len != body.len() as u64) {
+    if data.len() as u64 != len {
         return Err(HttpResponse::BadRequest().json(json!({
             "type": "E_PAYLOAD_SIZE",
             "message": "request payload doesn't match the specified Content-Length"
         })));
     }
-    Ok(body)
-}
-
-fn max_data_size(limits: &SharedVaultLimits) -> u64 {
-    limits.max_data_size.unwrap_or(MAX_UPLOAD).min(MAX_UPLOAD)
-}
-
-fn max_members(limits: &SharedVaultLimits) -> usize {
-    limits.max_members.map_or(sharing::MAX_MEMBERS, |max| {
-        (max as usize).min(sharing::MAX_MEMBERS)
+    Ok(Body {
+        data,
+        _permit: permit,
     })
-}
-
-/// The version's ETag: its epoch and number, which only ever increase.
-fn version_etag(version: &VersionBody) -> header::EntityTag {
-    header::EntityTag::new_strong(format!("{}-{}", version.epoch, version.version))
 }
 
 /// `username`'s published identity bundle, or why it can't be used.
@@ -186,20 +244,26 @@ async fn identity(app_state: &AppState, username: &str) -> Result<Vec<u8>, HttpR
 
 /// Checks a record's members exist and were verified with their current
 /// identity (a member whose fingerprint is unchanged since `prev` was checked
-/// when they were added), and that the vault's policy allows that many.
+/// when they were added), and that the vault's limits allow it. Call holding
+/// `identity_lock`, until the record is stored.
 async fn check_members(
     app_state: &AppState,
     record: &RecordBody,
+    record_len: usize,
     prev: Option<&RecordBody>,
-    limits: &SharedVaultLimits,
+    limits: &VaultLimits,
 ) -> Result<(), HttpResponse> {
-    let max = max_members(limits);
+    let max = limits.max_members as usize;
     if record.members.len() > max {
         return Err(policy_error(
             "add_shared_vault_member",
-            format!("a shared vault can have at most {max} members"),
+            format!("this shared vault can have at most {max} members"),
         ));
     }
+    if record_len as u64 > record_max_len(limits.max_members) {
+        return Err(invalid(anyhow::anyhow!("the member list is too large")));
+    }
+    check_time(record.time)?;
     for member in &record.members {
         validate_username(&member.username)?;
         if prev
@@ -222,56 +286,81 @@ async fn check_members(
     Ok(())
 }
 
+/// The version's ETag (see `version_etag`).
+fn entity_tag(version: &VersionBody) -> header::EntityTag {
+    header::EntityTag::new_strong(format!("{}-{}", version.epoch, version.version))
+}
+
+/// Checks a version's contents fit the vault and its time is plausible.
+fn check_version(
+    version: &VersionBody,
+    wire: &[u8],
+    limits: &VaultLimits,
+) -> Result<(), HttpResponse> {
+    check_time(version.time)?;
+    let content_len = sharing::version_content_len(wire).map_err(invalid)?;
+    if content_len > limits.max_data_size {
+        return Err(too_large(limits.max_data_size));
+    }
+    Ok(())
+}
+
+/// A vault the user is a member of, as known without its lock.
+struct MemberVault {
+    lock: VaultLock,
+    summary: Arc<Summary>,
+    write: bool,
+    manage: bool,
+}
+
+/// The vault `id` and what's known about it without its lock, if `username`
+/// is a member (and hasn't left).
+fn member_vault(
+    app_state: &AppState,
+    id: &str,
+    username: &str,
+) -> Result<MemberVault, HttpResponse> {
+    if !valid_id(id) {
+        return Err(not_found());
+    }
+    let (lock, summary) = app_state.shared_vaults.lookup(id).ok_or_else(not_found)?;
+    let (write, manage) = summary.member(username).ok_or_else(not_found)?;
+    Ok(MemberVault {
+        lock,
+        summary,
+        write,
+        manage,
+    })
+}
+
 /// The vault `id`, locked for reading, if `username` is a member.
 async fn read_vault(
     app_state: &AppState,
     id: &str,
     username: &str,
-) -> Result<tokio::sync::OwnedRwLockReadGuard<VaultState>, HttpResponse> {
-    let vault = vault_arc(app_state, id).await?;
-    let state = vault.read_owned().await;
-    if state.is_member(username) && !deleted(&state) {
+) -> Result<OwnedRwLockReadGuard<VaultState>, HttpResponse> {
+    let state = member_vault(app_state, id, username)?
+        .lock
+        .read_owned()
+        .await;
+    if state.is_member(username) {
         Ok(state)
     } else {
         Err(not_found())
     }
 }
 
-/// The vault `id`, locked for changing, if `username` is a member.
+/// The vault `id`, locked for changing, if `username` is (still) a member.
 async fn write_vault(
-    app_state: &AppState,
-    id: &str,
+    lock: VaultLock,
     username: &str,
-) -> Result<tokio::sync::OwnedRwLockWriteGuard<VaultState>, HttpResponse> {
-    let vault = vault_arc(app_state, id).await?;
-    let state = vault.write_owned().await;
-    if state.is_member(username) && !deleted(&state) {
+) -> Result<OwnedRwLockWriteGuard<VaultState>, HttpResponse> {
+    let state = lock.write_owned().await;
+    if state.is_member(username) {
         Ok(state)
     } else {
         Err(not_found())
     }
-}
-
-async fn vault_arc(
-    app_state: &AppState,
-    id: &str,
-) -> Result<Arc<RwLock<VaultState>>, HttpResponse> {
-    if !valid_id(id) {
-        return Err(not_found());
-    }
-    app_state
-        .shared_vaults
-        .vaults
-        .read()
-        .await
-        .get(id)
-        .cloned()
-        .ok_or_else(not_found)
-}
-
-/// A vault deleted while waiting for its lock has no members left.
-fn deleted(state: &VaultState) -> bool {
-    state.record.members.is_empty()
 }
 
 // ── Identities ───────────────────────────────────────────────────────────────
@@ -282,8 +371,9 @@ struct GetIdentityParams {
     server_ns: Option<String>,
     /// Whose identity to look up (the user's own when not given).
     user: Option<String>,
-    /// Or which identity: any bundle ever published, by its fingerprint (64
-    /// hex digits), to check records and versions made with it.
+    /// Or which identity: a bundle still in use (someone's current one, or
+    /// one named in a record kept), by its fingerprint (64 hex digits), to
+    /// check records and versions made with it.
     fingerprint: Option<String>,
 }
 
@@ -350,7 +440,8 @@ pub async fn get_identity(
 }
 
 /// Publishes the user's identity bundle. It can only be replaced while the
-/// user isn't a member of any shared vault, since those pin its fingerprint.
+/// user isn't a member of any shared vault, since those pin its fingerprint;
+/// the replaced one is deleted unless a record kept still names it.
 #[put("/identity")]
 pub async fn put_identity(
     app_state: web::Data<AppState>,
@@ -373,27 +464,26 @@ pub async fn put_identity(
         }
     };
     let shared = &app_state.shared_vaults;
-    // held so no vault can add the user with the old identity meanwhile
-    let vaults = shared.vaults.write().await;
+    // so no vault can add the user with the old identity meanwhile
+    let _identities = shared.identity_lock.lock().await;
     match shared.read_identity(&params.username).await {
         Ok(Some(current)) if current == bundle => {
             return HttpResponse::Ok().json(json!({ "type": "SUCCESS" }));
         }
-        Ok(Some(_)) => {
-            for vault in vaults.values() {
-                if vault.read().await.record.member(&params.username).is_some() {
-                    return conflict(
-                        "E_IDENTITY_IN_USE",
-                        "your identity can't be replaced while you're a member of a shared vault",
-                    );
-                }
-            }
+        Ok(Some(_)) if shared.in_any_vault(&params.username) => {
+            return conflict(
+                "E_IDENTITY_IN_USE",
+                "your identity can't be replaced while you're a member of a shared vault",
+            );
         }
-        Ok(None) => {}
+        Ok(_) => {}
         Err(e) => return internal_error("read an identity", e),
     }
     match shared.write_identity(&params.username, &bundle).await {
-        Ok(()) => HttpResponse::Ok().json(json!({ "type": "SUCCESS" })),
+        Ok(replaced) => {
+            shared.forget_bundles(replaced).await;
+            HttpResponse::Ok().json(json!({ "type": "SUCCESS" }))
+        }
         Err(e) => internal_error("save an identity", e),
     }
 }
@@ -406,20 +496,41 @@ fn base64_decode(value: &str) -> Option<Vec<u8>> {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct ArchiveSize {
+    epoch: u64,
+    /// Its encrypted history's size (counted toward the vault's limit).
+    size: u64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Leaving {
+    username: String,
+    /// The signed statement (base64), for managers' browsers to check
+    /// before removing them.
+    statement: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct VaultInfo {
     id: String,
     /// The latest record's `seq` and the current version's ETag, to tell
     /// whether this device's copy is up to date.
     seq: u64,
+    /// The oldest record kept.
+    first_seq: u64,
     etag: String,
     /// Epochs whose history is archived.
-    archives: Vec<u64>,
-    /// Members who left and are still to be removed by a manager.
-    leaving: Vec<String>,
-    /// Bytes stored for the vault (its current version and archives).
-    size: u64,
-    max_data_size: Option<u64>,
-    max_members: usize,
+    archives: Vec<ArchiveSize>,
+    /// Members leaving, still to be removed by a manager.
+    leaving: Vec<Leaving>,
+    /// What counts toward the size limit: the encrypted contents of the
+    /// current version and the archives.
+    usage: u64,
+    max_data_size: u64,
+    max_members: u32,
+    max_records: u32,
     /// False once the vault's policy no longer allows changes.
     writable: bool,
 }
@@ -436,34 +547,35 @@ pub async fn list(
     if let Err(e) = authenticate(&app_state, &req, &params).await {
         return e;
     }
-    let vaults: Vec<(String, Arc<RwLock<VaultState>>)> = app_state
-        .shared_vaults
-        .vaults
-        .read()
-        .await
-        .iter()
-        .map(|(id, v)| (id.clone(), v.clone()))
-        .collect();
     let mut infos = Vec::new();
-    for (id, vault) in vaults {
-        let state = vault.read().await;
-        if !state.is_member(&params.username) || deleted(&state) {
-            continue;
-        }
-        let limits = app_state
+    for (id, summary) in app_state.shared_vaults.summaries_for(&params.username) {
+        let writable = app_state
             .policies_and_config
-            .shared_vault_limits(state.meta.policy_ns.as_deref())
+            .shared_vault_writable(summary.policy_ns.as_deref())
             .await;
         infos.push(VaultInfo {
             id,
-            seq: state.record.seq,
-            etag: version_etag(&state.version).to_string(),
-            archives: state.archives.keys().copied().collect(),
-            leaving: state.meta.leaving.iter().cloned().collect(),
-            size: state.total_len(),
-            max_data_size: limits.max_data_size,
-            max_members: max_members(&limits),
-            writable: limits.writable,
+            seq: summary.seq,
+            first_seq: summary.first_seq,
+            etag: summary.etag.clone(),
+            archives: summary
+                .archives
+                .iter()
+                .map(|&(epoch, size)| ArchiveSize { epoch, size })
+                .collect(),
+            leaving: summary
+                .leaving
+                .iter()
+                .map(|(username, statement)| Leaving {
+                    username: username.clone(),
+                    statement: statement.clone(),
+                })
+                .collect(),
+            usage: summary.usage,
+            max_data_size: summary.limits.max_data_size,
+            max_members: summary.limits.max_members,
+            max_records: summary.limits.max_records,
+            writable,
         });
     }
     infos.sort_by(|a, b| a.id.cmp(&b.id));
@@ -479,8 +591,8 @@ fn record_and_version(body: &[u8]) -> Result<(&[u8], &[u8]), HttpResponse> {
 }
 
 /// Creates a shared vault from its first record and version (frames, see
-/// `sharing::encode_frames`), counted against the policy of the request's
-/// credentials, whose limits then apply to it.
+/// `sharing::encode_frames`). Its limits come from the policy of the
+/// request's credentials, which also counts it (as does its creator).
 #[post("/shared-vaults")]
 pub async fn create(
     app_state: web::Data<AppState>,
@@ -506,15 +618,13 @@ pub async fn create(
         Err(e) => return e,
         Ok(o) => o,
     };
-    let limits = app_state
-        .policies_and_config
-        .shared_vault_limits(slot.policy_ns.as_deref())
-        .await;
-    let body = match read_body(&req, &mut payload, max_data_size(&limits) + 512 * 1024).await {
+    let limits = slot.limits;
+    let max = record_max_len(limits.max_members) + version_max_len(&limits) + 8;
+    let body = match read_body(&app_state, &req, &mut payload, max).await {
         Err(e) => return e,
         Ok(o) => o,
     };
-    let (record_wire, version_wire) = match record_and_version(&body) {
+    let (record_wire, version_wire) = match record_and_version(&body.data) {
         Err(e) => return e,
         Ok(o) => o,
     };
@@ -529,9 +639,6 @@ pub async fn create(
     if record.author != params.username || !valid_id(&record.vault_id) {
         return invalid(anyhow::anyhow!("the record must be yours, with a valid id"));
     }
-    if let Err(e) = check_members(&app_state, &record, None, &limits).await {
-        return e;
-    }
     let version = match sharing::verify_version(&record, version_wire, &bundle) {
         Err(e) => return invalid(e),
         Ok(o) => o,
@@ -539,45 +646,50 @@ pub async fn create(
     if version.version != 1 || version.author != params.username || version.rekey {
         return invalid(anyhow::anyhow!("not a first version"));
     }
-    if version_wire.len() as u64 > max_data_size(&limits) {
-        return policy_error(
-            "update_shared_vault",
-            format!(
-                "the shared vault would be larger than its maximum size {}",
-                max_data_size(&limits)
-            ),
-        );
+    if let Err(e) = check_version(&version, version_wire, &limits) {
+        return e;
     }
-    let id = record.vault_id.clone();
     let shared = &app_state.shared_vaults;
-    let mut vaults = shared.vaults.write().await;
-    if vaults.contains_key(&id) {
-        return conflict("E_EXISTS", "a shared vault with this id exists");
+    let id = record.vault_id.clone();
+    let reservation = match shared.reserve_creation(&id, &params.username, slot.max_per_user) {
+        Ok(o) => o,
+        Err(ReserveError::Exists) => {
+            return conflict("E_EXISTS", "a shared vault with this id exists");
+        }
+        Err(ReserveError::TooMany(max)) => {
+            return policy_error(
+                "create_shared_vault",
+                format!("you can create at most {max} shared vaults"),
+            );
+        }
+    };
+    let _identities = shared.identity_lock.lock().await;
+    if let Err(e) = check_members(&app_state, &record, record_wire.len(), None, &limits).await {
+        return e;
     }
     let meta = VaultMeta {
         policy_ns: slot.policy_ns.clone(),
+        creator: params.username.clone(),
+        limits,
         leaving: Default::default(),
     };
-    if let Err(e) = shared.create(&id, &meta, record_wire, version_wire).await {
-        let _ = shared.delete(&id).await;
-        return internal_error("create a shared vault", e);
-    }
     let etag = version_etag(&version);
-    vaults.insert(
-        id.clone(),
-        Arc::new(RwLock::new(VaultState {
+    if let Err(e) = shared
+        .create(
+            reservation,
             meta,
             record,
-            record_wire: record_wire.to_vec(),
+            record_wire,
             version,
-            version_len: version_wire.len() as u64,
-            archives: Default::default(),
-        })),
-    );
-    drop(vaults);
+            version_wire,
+        )
+        .await
+    {
+        return internal_error("create a shared vault", e);
+    }
     slot.commit();
     HttpResponse::Created()
-        .insert_header(header::ETag(etag))
+        .insert_header((header::ETAG, etag))
         .json(json!({ "type": "SUCCESS", "id": id }))
 }
 
@@ -585,12 +697,13 @@ pub async fn create(
 struct RecordsParams {
     username: String,
     server_ns: Option<String>,
-    /// The first record to return.
+    /// The first record wanted.
     from: Option<u64>,
 }
 
-/// The vault's records from `from` on (base64), so a member can check the
-/// whole chain from its first record.
+/// The vault's records from `from` on (base64), or from the oldest kept if
+/// that's later (`from` in the response says which), so a member can check
+/// the whole chain the server keeps.
 #[get("/shared-vaults/{id}/records")]
 pub async fn get_records(
     app_state: web::Data<AppState>,
@@ -616,19 +729,21 @@ pub async fn get_records(
         Err(e) => return e,
         Ok(o) => o,
     };
+    let start = from.unwrap_or(0).max(state.first_seq);
     let mut records = Vec::new();
-    for seq in from.unwrap_or(0)..=state.record.seq {
+    for seq in start..=state.record.seq {
         match tokio::fs::read(app_state.shared_vaults.record_path(&id, seq)).await {
             Ok(wire) => records.push(sharing::b64_encode(&wire)),
             Err(e) => return internal_error("read a record", e),
         }
     }
-    HttpResponse::Ok().json(json!({ "records": records }))
+    HttpResponse::Ok().json(json!({ "from": start, "records": records }))
 }
 
 /// Starts a new epoch: a record changing the member list (made by a manager)
 /// and the epoch's first version, which re-encrypts the vault with the new
-/// key. `If-Match` must hold the current version's ETag.
+/// key. `If-Match` must hold the current version's ETag. Records beyond the
+/// vault's limit are dropped (oldest first, with their epochs' history).
 #[post("/shared-vaults/{id}/records")]
 pub async fn post_record(
     app_state: web::Data<AppState>,
@@ -648,25 +763,25 @@ pub async fn post_record(
         return e;
     }
     let id = path.into_inner();
-    let mut state = match write_vault(&app_state, &id, &params.username).await {
+    let MemberVault {
+        lock,
+        summary,
+        manage,
+        ..
+    } = match member_vault(&app_state, &id, &params.username) {
         Err(e) => return e,
         Ok(o) => o,
     };
-    let limits = app_state
-        .policies_and_config
-        .shared_vault_limits(state.meta.policy_ns.as_deref())
-        .await;
-    if !limits.writable {
-        return read_only_error();
+    if !manage {
+        return forbidden("only a manager can change the members");
     }
-    let body = match read_body(&req, &mut payload, max_data_size(&limits) + 512 * 1024).await {
+    let limits = summary.limits;
+    let max = record_max_len(limits.max_members) + version_max_len(&limits) + 8;
+    let body = match read_body(&app_state, &req, &mut payload, max).await {
         Err(e) => return e,
         Ok(o) => o,
     };
-    if let Err(e) = check_if_match(&if_match, &version_etag(&state.version)) {
-        return e;
-    }
-    let (record_wire, version_wire) = match record_and_version(&body) {
+    let (record_wire, version_wire) = match record_and_version(&body.data) {
         Err(e) => return e,
         Ok(o) => o,
     };
@@ -674,6 +789,21 @@ pub async fn post_record(
         Err(e) => return e,
         Ok(o) => o,
     };
+
+    let mut state = match write_vault(lock, &params.username).await {
+        Err(e) => return e,
+        Ok(o) => o,
+    };
+    if !app_state
+        .policies_and_config
+        .shared_vault_writable(state.meta.policy_ns.as_deref())
+        .await
+    {
+        return read_only_error();
+    }
+    if let Err(e) = check_if_match(&if_match, &entity_tag(&state.version)) {
+        return e;
+    }
     let record = match sharing::verify_record(
         Some((&state.record, &state.record_wire)),
         record_wire,
@@ -688,16 +818,13 @@ pub async fn post_record(
     if let Some(name) = state
         .meta
         .leaving
-        .iter()
+        .keys()
         .find(|name| record.member(name).is_some())
     {
         return conflict(
             "E_MEMBER_LEAVING",
-            &format!("{name} left the vault and must be removed"),
+            &format!("{name} is leaving the vault and must be removed"),
         );
-    }
-    if let Err(e) = check_members(&app_state, &record, Some(&state.record), &limits).await {
-        return e;
     }
     let version = match sharing::verify_version(&record, version_wire, &bundle) {
         Err(e) => return invalid(e),
@@ -706,47 +833,41 @@ pub async fn post_record(
     if version.version != state.version.version + 1 || version.author != params.username {
         return invalid(anyhow::anyhow!("not the next version"));
     }
-    // older archives make room for the new one if needed
-    let max = max_data_size(&limits);
-    if version_wire.len() as u64 > max {
-        return policy_error(
-            "update_shared_vault",
-            format!("the shared vault would be larger than its maximum size {max}"),
-        );
+    if let Err(e) = check_version(&version, version_wire, &limits) {
+        return e;
     }
-    let archived = match app_state
-        .shared_vaults
-        .start_epoch(&id, &state, record_wire, version_wire)
+
+    let shared = &app_state.shared_vaults;
+    let _identities = shared.identity_lock.lock().await;
+    let prev = state.record.clone();
+    if let Err(e) =
+        check_members(&app_state, &record, record_wire.len(), Some(&prev), &limits).await
+    {
+        return e;
+    }
+    let etag = version_etag(&version);
+    if let Err(e) = shared
+        .start_epoch(&id, &mut state, record, record_wire, version, version_wire)
         .await
     {
-        Err(e) => return internal_error("start an epoch", e),
-        Ok(o) => o,
-    };
-    let old_epoch = state.version.epoch;
-    state.archives.insert(old_epoch, archived);
-    state.record = record;
-    state.record_wire = record_wire.to_vec();
-    state.version_len = version_wire.len() as u64;
-    let etag = version_etag(&version);
-    state.version = version;
-    prune_archives(&app_state, &id, &mut state, max).await;
-    HttpResponse::Ok()
-        .insert_header(header::ETag(etag))
-        .json(json!({ "type": "SUCCESS" }))
-}
-
-/// Drops the oldest archived history until the vault fits in `max`.
-async fn prune_archives(app_state: &AppState, id: &str, state: &mut VaultState, max: u64) {
-    while state.total_len() > max {
-        let Some((&epoch, _)) = state.archives.iter().next() else {
-            return;
-        };
-        if let Err(e) = app_state.shared_vaults.remove_archive(id, epoch).await {
-            eprintln!("Error occured attempting to remove an archive\n  e={e:?}");
-            return;
-        }
-        state.archives.remove(&epoch);
+        return internal_error("start an epoch", e);
     }
+    // everyone leaving was removed
+    if !state.meta.leaving.is_empty() {
+        let mut meta = state.meta.clone();
+        meta.leaving.clear();
+        if let Err(e) = shared.save_meta(&id, &meta).await {
+            eprintln!("Error occured attempting to save a vault's members leaving\n  e={e:?}");
+        }
+        state.meta = meta;
+    }
+    let dropped = shared.prune(&id, &mut state).await;
+    shared.update_summary(&id, &state);
+    drop(state);
+    shared.forget_bundles(dropped).await;
+    HttpResponse::Ok()
+        .insert_header((header::ETAG, etag))
+        .json(json!({ "type": "SUCCESS" }))
 }
 
 /// The current version (frames, see `sharing::sign_version`).
@@ -771,13 +892,12 @@ pub async fn get_version(
         Ok(o) => o,
         Err(e) => return internal_error("open a shared vault", e),
     };
-    let etag = version_etag(&state.version);
+    let etag = entity_tag(&state.version);
     let len = state.version_len;
-    let last_modified = header::HttpDate::from(
-        std::time::UNIX_EPOCH + std::time::Duration::from_millis(state.version.time),
-    );
+    let last_modified = http_date_from_millis(state.version.time);
+    // the open file stays this version even if a save replaces it now
+    drop(state);
     streaming_download(
-        state,
         file,
         len,
         len,
@@ -792,7 +912,9 @@ pub async fn get_version(
 
 /// Saves a new version in the current epoch. `If-Match` must hold the
 /// current version's ETag; a version of an earlier epoch is refused with
-/// `E_EPOCH_CHANGED` (re-encrypt it with the new key and try again).
+/// `E_EPOCH_CHANGED` (re-encrypt it with the new key and try again). The
+/// oldest archived history is dropped if needed to stay within the vault's
+/// size.
 #[put("/shared-vaults/{id}/version")]
 pub async fn put_version(
     app_state: web::Data<AppState>,
@@ -812,23 +934,20 @@ pub async fn put_version(
         return e;
     }
     let id = path.into_inner();
-    let mut state = match write_vault(&app_state, &id, &params.username).await {
+    let MemberVault {
+        lock,
+        summary,
+        write,
+        ..
+    } = match member_vault(&app_state, &id, &params.username) {
         Err(e) => return e,
         Ok(o) => o,
     };
-    let member = state.record.member(&params.username).cloned();
-    if !member.is_some_and(|m| m.write) {
+    if !write {
         return forbidden("you can't change this vault");
     }
-    let limits = app_state
-        .policies_and_config
-        .shared_vault_limits(state.meta.policy_ns.as_deref())
-        .await;
-    if !limits.writable {
-        return read_only_error();
-    }
-    let max = max_data_size(&limits);
-    let body = match read_body(&req, &mut payload, max).await {
+    let limits = summary.limits;
+    let body = match read_body(&app_state, &req, &mut payload, version_max_len(&limits)).await {
         Err(e) => return e,
         Ok(o) => o,
     };
@@ -836,7 +955,26 @@ pub async fn put_version(
         Err(e) => return e,
         Ok(o) => o,
     };
-    if let Ok(frames) = sharing::decode_frames(&body, 4)
+
+    let mut state = match write_vault(lock, &params.username).await {
+        Err(e) => return e,
+        Ok(o) => o,
+    };
+    if !state
+        .record
+        .member(&params.username)
+        .is_some_and(|m| m.write)
+    {
+        return forbidden("you can't change this vault");
+    }
+    if !app_state
+        .policies_and_config
+        .shared_vault_writable(state.meta.policy_ns.as_deref())
+        .await
+    {
+        return read_only_error();
+    }
+    if let Ok(frames) = sharing::decode_frames(&body.data, 4)
         && let Ok(claimed) = serde_json::from_slice::<VersionBody>(frames[0])
         && claimed.epoch != state.record.seq
     {
@@ -846,10 +984,10 @@ pub async fn put_version(
             "seq": state.record.seq
         }));
     }
-    if let Err(e) = check_if_match(&if_match, &version_etag(&state.version)) {
+    if let Err(e) = check_if_match(&if_match, &entity_tag(&state.version)) {
         return e;
     }
-    let version = match sharing::verify_version(&state.record, &body, &bundle) {
+    let version = match sharing::verify_version(&state.record, &body.data, &bundle) {
         Err(e) => return invalid(e),
         Ok(o) => o,
     };
@@ -859,17 +997,21 @@ pub async fn put_version(
     {
         return invalid(anyhow::anyhow!("not the next version"));
     }
-    if let Err(e) =
-        crate::shared_vaults::write_atomic(&app_state.shared_vaults.current_path(&id), &body).await
+    if let Err(e) = check_version(&version, &body.data, &limits) {
+        return e;
+    }
+    let shared = &app_state.shared_vaults;
+    let etag = version_etag(&version);
+    if let Err(e) = shared
+        .save_version(&id, &mut state, version, &body.data)
+        .await
     {
         return internal_error("save a shared vault", e);
     }
-    state.version_len = body.len() as u64;
-    let etag = version_etag(&version);
-    state.version = version;
-    prune_archives(&app_state, &id, &mut state, max).await;
+    shared.prune(&id, &mut state).await;
+    shared.update_summary(&id, &state);
     HttpResponse::Ok()
-        .insert_header(header::ETag(etag))
+        .insert_header((header::ETAG, etag))
         .json(json!({ "type": "SUCCESS" }))
 }
 
@@ -891,9 +1033,9 @@ pub async fn get_archive(
         Err(e) => return e,
         Ok(o) => o,
     };
-    if !state.archives.contains_key(&epoch) {
+    let Some(archive) = state.archives.get(&epoch).copied() else {
         return not_found();
-    }
+    };
     let shared = &app_state.shared_vaults;
     // only for members of that epoch: later members may not read it
     let was_member = match tokio::fs::read(shared.record_path(&id, epoch)).await {
@@ -904,22 +1046,35 @@ pub async fn get_archive(
     if !was_member {
         return not_found();
     }
-    match tokio::fs::read(shared.archive_path(&id, epoch)).await {
-        Ok(data) => HttpResponse::Ok()
-            .content_type("application/octet-stream")
-            .body(data),
-        Err(e) => internal_error("read an archive", e),
-    }
+    let file = match tokio::fs::File::open(shared.archive_path(&id, epoch)).await {
+        Ok(o) => o,
+        Err(e) => return internal_error("read an archive", e),
+    };
+    drop(state);
+    streaming_download(
+        file,
+        archive.len,
+        archive.len,
+        None,
+        header::EntityTag::new_strong(format!("archive-{epoch}")),
+        format!(
+            "GET /shared-vaults/{id}/archive/{epoch}\n  username={:?}",
+            params.username
+        ),
+    )
 }
 
-/// Leaves the vault: the user can no longer open it, and a manager's browser
-/// removes them from the member list (with a new key) when it next can.
+/// Records a signed statement (the body) that a member is leaving, made by
+/// them or by a manager (the user making the request) in the current epoch.
+/// The member can no longer open the vault, and a manager's browser removes
+/// them (with a new key) when it next can, after checking the statement.
 #[post("/shared-vaults/{id}/leave")]
 pub async fn leave(
     app_state: web::Data<AppState>,
     path: web::Path<String>,
     query: web::Query<UserParams>,
     req: HttpRequest,
+    mut payload: web::Payload,
 ) -> impl Responder {
     eprintln!("POST /shared-vaults/{path}/leave\n  query = {query:?}");
     let params = query.into_inner();
@@ -927,15 +1082,49 @@ pub async fn leave(
         return e;
     }
     let id = path.into_inner();
-    let mut state = match write_vault(&app_state, &id, &params.username).await {
+    let lock = match member_vault(&app_state, &id, &params.username) {
+        Err(e) => return e,
+        Ok(o) => o.lock,
+    };
+    let body = match read_body(&app_state, &req, &mut payload, MAX_STATEMENT).await {
         Err(e) => return e,
         Ok(o) => o,
     };
+    let claimed = match sharing::parse_leave(&body.data) {
+        Err(e) => return invalid(e),
+        Ok(o) => o,
+    };
+    if claimed.author != params.username {
+        return invalid(anyhow::anyhow!("the statement must be yours"));
+    }
+    let shared = &app_state.shared_vaults;
+    let mut state = match write_vault(lock, &params.username).await {
+        Err(e) => return e,
+        Ok(o) => o,
+    };
+    let Some(author) = state.record.member(&params.username) else {
+        return not_found();
+    };
+    let bundle = match shared.bundle_of(&author.fingerprint).await {
+        Ok(Some(bundle)) => bundle,
+        Ok(None) => return invalid(anyhow::anyhow!("your identity isn't known")),
+        Err(e) => return internal_error("read an identity", e),
+    };
+    let statement = match sharing::verify_leave(&state.record, &body.data, &bundle) {
+        Err(e) => return invalid(e),
+        Ok(o) => o,
+    };
+    if let Err(e) = check_time(statement.time) {
+        return e;
+    }
+    if state.meta.leaving.contains_key(&statement.member) {
+        return HttpResponse::Ok().json(json!({ "type": "SUCCESS" }));
+    }
     let staying: Vec<_> = state
         .record
         .members
         .iter()
-        .filter(|m| m.username != params.username && !state.meta.leaving.contains(&m.username))
+        .filter(|m| m.username != statement.member && !state.meta.leaving.contains_key(&m.username))
         .collect();
     if staying.is_empty() {
         return conflict(
@@ -950,11 +1139,13 @@ pub async fn leave(
         );
     }
     let mut meta = state.meta.clone();
-    meta.leaving.insert(params.username.clone());
-    if let Err(e) = app_state.shared_vaults.save_meta(&id, &meta).await {
+    meta.leaving
+        .insert(statement.member.clone(), sharing::b64_encode(&body.data));
+    if let Err(e) = shared.save_meta(&id, &meta).await {
         return internal_error("leave a shared vault", e);
     }
     state.meta = meta;
+    shared.update_summary(&id, &state);
     HttpResponse::Ok().json(json!({ "type": "SUCCESS" }))
 }
 
@@ -972,19 +1163,15 @@ pub async fn delete_vault(
         return e;
     }
     let id = path.into_inner();
-    if !valid_id(&id) {
-        return not_found();
-    }
-    let shared = &app_state.shared_vaults;
-    let mut vaults = shared.vaults.write().await;
-    let Some(vault) = vaults.get(&id).cloned() else {
-        return not_found();
+    let lock = match member_vault(&app_state, &id, &params.username) {
+        Err(e) => return e,
+        Ok(o) => o.lock,
     };
-    // after any download or save in progress
-    let mut state = vault.write().await;
-    if !state.is_member(&params.username) {
-        return not_found();
-    }
+    // after any save in progress (downloads don't hold it)
+    let mut state = match write_vault(lock, &params.username).await {
+        Err(e) => return e,
+        Ok(o) => o,
+    };
     if !state
         .record
         .member(&params.username)
@@ -992,18 +1179,18 @@ pub async fn delete_vault(
     {
         return forbidden("only a manager can delete this vault");
     }
-    if let Err(e) = shared.delete(&id).await {
-        return internal_error("delete a shared vault", e);
-    }
-    vaults.remove(&id);
-    drop(vaults);
-    // anything still waiting for the lock sees it was deleted
-    state.record.members.clear();
+    let shared = &app_state.shared_vaults;
+    let fingerprints = match shared.delete(&id, &mut state).await {
+        Err(e) => return internal_error("delete a shared vault", e),
+        Ok(o) => o,
+    };
     let policy_ns = state.meta.policy_ns.clone();
     drop(state);
     app_state
         .policies_and_config
         .release_shared_vault(policy_ns.as_deref())
         .await;
+    let _identities = shared.identity_lock.lock().await;
+    shared.forget_bundles(fingerprints).await;
     HttpResponse::Ok().json(json!({ "type": "SUCCESS" }))
 }

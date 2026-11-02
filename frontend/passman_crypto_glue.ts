@@ -1,4 +1,5 @@
 import init, {
+  account_keys,
   derive_key,
   hash_size,
   xchacha20_decrypt,
@@ -32,6 +33,19 @@ export function deriveKey(password: string, salt: Uint8Array): Uint8Array {
     throw new Error(`salt must be ${SALT_LEN} bytes, got ${salt.byteLength}`);
   }
   return derive_key(password, salt);
+}
+
+/** An account's auth and encryption keys, from one Argon2id of the password
+ *  (see `derive_account_keys` in passman_crypto). */
+export function deriveAccountKeys(
+  username: string,
+  password: string,
+): { authKey: Uint8Array; encryptionKey: Uint8Array } {
+  const keys = account_keys(username, password);
+  return {
+    authKey: keys.slice(0, SALT_LEN),
+    encryptionKey: keys.slice(SALT_LEN),
+  };
 }
 
 /**

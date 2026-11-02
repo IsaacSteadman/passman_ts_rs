@@ -12,10 +12,14 @@ import {
   identity_bundle,
   identity_fingerprint,
   identity_generate,
+  leave_body,
+  leave_sign,
+  leave_verify,
   record_body,
   record_hash,
   record_sign,
   record_verify,
+  record_verify_anchor,
   safety_number,
   unwrap_key,
   version_sign,
@@ -77,6 +81,22 @@ export interface SharedContent {
   name: string;
   tables: PassTableData[];
   history: HistoryEntry[];
+  /** How many of the newest history entries are kept when older ones must
+   *  go to fit the vault's size limit (`DEFAULT_MIN_HISTORY` if unset). */
+  minHistory?: number;
+}
+
+export const DEFAULT_MIN_HISTORY = 10;
+
+/** A statement that `member` is leaving, made by them or a manager in the
+ *  epoch `seq` (see `LeaveBody` in sharing.rs). */
+export interface LeaveBody {
+  v: 1;
+  vaultId: string;
+  seq: number;
+  member: string;
+  author: string;
+  time: number;
 }
 
 export interface EpochKeys {
@@ -175,6 +195,19 @@ export function recordSignerFingerprint(
   return members.find((m) => m.username === body.author)?.fingerprint ?? null;
 }
 
+/** Checks the oldest record the server keeps of a vault whose earlier ones it
+ *  dropped (throws if invalid). Like a first record, it's trusted on first
+ *  sight. */
+export function verifyAnchorRecord(
+  wire: Uint8Array,
+  authorBundle: Uint8Array,
+): VerifiedRecord {
+  const body = JSON.parse(
+    record_verify_anchor(wire, authorBundle),
+  ) as RecordBody;
+  return { body, wire };
+}
+
 /** Checks `wire` follows `prev` (throws if not). */
 export function verifyRecord(
   prev: VerifiedRecord | null,
@@ -251,9 +284,27 @@ export function newRecord(
 
 // ── Versions ────────────────────────────────────────────────────────────────
 
-/** The JSON of a vault's tables and name, as encrypted. */
+/** The JSON of a vault's tables, name and settings, as encrypted. */
 export function tablesPlaintext(content: SharedContent): string {
-  return JSON.stringify({ name: content.name, tables: content.tables });
+  return JSON.stringify({
+    name: content.name,
+    tables: content.tables,
+    minHistory: content.minHistory,
+  });
+}
+
+/** The size of what encrypting `plaintext` makes (nonce and tag added). */
+export function ciphertextLen(plaintext: string): number {
+  return 24 + encoder.encode(plaintext).byteLength + 16;
+}
+
+/** The size of a version's encrypted tables and history: what counts
+ *  toward the vault's size limit. */
+export function contentLen(content: SharedContent): number {
+  return (
+    ciphertextLen(tablesPlaintext(content)) +
+    ciphertextLen(JSON.stringify(content.history))
+  );
 }
 
 export function sealVersion(
@@ -311,6 +362,7 @@ export function decryptVersion(
   const parsed = JSON.parse(tablesJson) as {
     name: string;
     tables: PassTableData[];
+    minHistory?: number;
   };
   return {
     body: JSON.parse(decoder.decode(body)) as VersionBody,
@@ -318,6 +370,7 @@ export function decryptVersion(
     content: {
       name: parsed.name,
       tables: parsed.tables,
+      minHistory: parsed.minHistory,
       history: JSON.parse(
         decoder.decode(decryptBlob(keys.history, history)),
       ) as HistoryEntry[],
@@ -370,4 +423,43 @@ export function newVaultId(): string {
   return Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) =>
     b.toString(16).padStart(2, "0"),
   ).join("");
+}
+
+// ── Leaving ─────────────────────────────────────────────────────────────────
+
+/** Signs a statement that `member` is leaving the vault in the epoch of
+ *  `record` (by them, or by a manager). */
+export function signLeave(
+  identitySecret: string,
+  record: VerifiedRecord,
+  member: string,
+  author: string,
+): Uint8Array<ArrayBuffer> {
+  const body: LeaveBody = {
+    v: 1,
+    vaultId: record.body.vaultId,
+    seq: record.body.seq,
+    member,
+    author,
+    time: Date.now(),
+  };
+  return leave_sign(
+    fromBase64Url(identitySecret),
+    JSON.stringify(body),
+  ) as Uint8Array<ArrayBuffer>;
+}
+
+/** A leave statement's body, before it has been checked. */
+export function unverifiedLeaveBody(wire: Uint8Array): LeaveBody {
+  return JSON.parse(leave_body(wire)) as LeaveBody;
+}
+
+/** Checks a leave statement made in the epoch `record` started (throws if
+ *  invalid). */
+export function verifyLeave(
+  record: VerifiedRecord,
+  wire: Uint8Array,
+  authorBundle: Uint8Array,
+): LeaveBody {
+  return JSON.parse(leave_verify(record.wire, wire, authorBundle)) as LeaveBody;
 }

@@ -46,7 +46,7 @@ pub async fn route(
         metadata,
         ..
     } = match app_state
-        .get_user(&username, &auth_key, AUTH_KEY_HEADER)
+        .get_user(&req, &username, &auth_key, AUTH_KEY_HEADER)
         .await
     {
         Err(e) => return e,
@@ -79,12 +79,13 @@ pub async fn route(
     if let Err(e) = len_checker.check_len(remain_len) {
         return e;
     }
+    // the open file stays this version even if a save replaces it now
+    drop(read_guard);
     streaming_download(
-        read_guard,
         read_file,
         metadata.len(),
         remain_len,
-        last_modified,
+        Some(last_modified),
         etag,
         format!("GET /pass-table\n  username={username:?}"),
     )

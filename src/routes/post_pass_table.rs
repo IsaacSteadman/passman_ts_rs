@@ -1,6 +1,6 @@
 use crate::routes::base::{
     AUTH_KEY_HEADER, AppState, UserDataHeader, WritingFile, auth_key_header, get_content_length,
-    policy_params, validate_password, validate_username,
+    is_reserved_username, policy_params, validate_password, validate_username,
 };
 use actix_web::{HttpRequest, HttpResponse, Responder, http::header, post, web};
 use futures_util::StreamExt;
@@ -61,41 +61,36 @@ pub async fn route(
         Ok(o) => o,
     };
 
-    let user_locks = app_state.user_locks.read().await;
-
-    let user_path = app_state.server_data_dir.join(&username);
-    if user_path.is_file() || user_locks.contains_key(&username) {
-        return HttpResponse::Conflict().json(json!({
+    let taken = || {
+        HttpResponse::Conflict().json(json!({
             "type": "E_USER_EXISTS",
             "param": "username",
             "message": "user already exists"
-        }));
+        }))
+    };
+    if is_reserved_username(&username) {
+        return taken();
+    }
+    let user_path = app_state.server_data_dir.join(&username);
+    if tokio::fs::symlink_metadata(&user_path).await.is_ok() {
+        return taken();
+    }
+    // the new account's lock, held until it's saved (or given up, which
+    // removes it again)
+    let new_lock = Arc::new(RwLock::new(()));
+    let write_guard = match new_lock.clone().try_write_owned() {
+        Ok(guard) => guard,
+        Err(_) => unreachable!("nobody else has the new lock"),
+    };
+    {
+        let mut user_locks = app_state.user_locks();
+        if user_locks.contains_key(&username) {
+            return taken();
+        }
+        user_locks.insert(username.clone(), new_lock);
     }
 
-    let mut user_locks = match app_state.user_locks.upgrade(user_locks).await {
-        Ok(o) => o,
-        Err(_) => {
-            return HttpResponse::Conflict().json(json!({
-                "type": "E_AUTH_CONFLICT",
-                "message": "failed to upgrade to exlusive lock",
-            }));
-        }
-    };
-    let new_lock = Arc::new(RwLock::new(()));
-    user_locks.insert(username.clone(), Arc::clone(&new_lock));
-    let write_guard = new_lock.write_owned().await;
-    drop(user_locks);
-
-    let udh = match UserDataHeader::from_password(&password, &app_state.argon2_params.make()).await
-    {
-        Err(e) => {
-            eprintln!(
-                "Error occured attempting to create UserDataHeader from password\n  username={username:?}\n  e={e:?}"
-            );
-            return HttpResponse::InternalServerError().finish();
-        }
-        Ok(o) => o,
-    };
+    let udh = UserDataHeader::from_auth_key(&password);
 
     let write_file_path = app_state.server_data_dir.join(format!(".{}.tmp", username));
     let mut accum_total_len = 0u64;

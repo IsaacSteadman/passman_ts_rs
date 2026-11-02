@@ -15,10 +15,13 @@
 import { encryptBlob, initWasm } from "../../frontend/passman_crypto_glue";
 import { initTheme } from "../../frontend/theme";
 import {
+  RollbackError,
+  checkNotOlder,
   credentialHeaders,
   decodeVault,
   describeError,
   downloadVault,
+  sealVault,
   unlockWithKeys,
   unlockWithPassword,
   type LoginResult,
@@ -170,6 +173,8 @@ async function finishUnlock(result: LoginResult | string): Promise<void> {
     for (const cached of await listSharedVaults(account.id)) {
       try {
         const vault = SharedVault.fromCache(client, cached);
+        // invitations aren't used until accepted
+        if (vault.pending) continue;
         unverified.set(vault.id, vault.unverifiedManagers(sharing.contacts));
         logins.push(
           ...loginsIn(vault.data.tables, {
@@ -493,12 +498,10 @@ async function saveOwnVault(
     return { ok: true, onDevice: true };
   }
   for (let attempt = 0; attempt < 3; attempt++) {
-    const data = structuredClone(result.synced.data);
-    change(data);
-    const blob = encryptBlob(
-      key,
-      new TextEncoder().encode(JSON.stringify(data)),
-    );
+    const base = result.synced.data;
+    const changed = structuredClone(base);
+    change(changed);
+    const { blob, saved: data } = sealVault(key, changed, base);
     const url = serverUrl("/pass-table");
     url.searchParams.set("username", result.username);
     if (result.serverNs != null)
@@ -525,16 +528,25 @@ async function saveOwnVault(
       );
       if (!latest.ok)
         return { ok: false, message: `Couldn't save ${latest.message}` };
+      let latestData: VaultRoot;
       try {
-        result.synced = {
-          data: decodeVault(key, latest.blob),
-          blob: latest.blob,
-          etag: latest.etag,
-          lastModified: latest.lastModified,
-        };
+        latestData = decodeVault(key, latest.blob);
       } catch {
         return PASSWORD_CHANGED;
       }
+      try {
+        checkNotOlder(latestData, result.synced.data);
+      } catch (e) {
+        if (e instanceof RollbackError)
+          return { ok: false, message: `Not saved: ${e.message}.` };
+        throw e;
+      }
+      result.synced = {
+        data: latestData,
+        blob: latest.blob,
+        etag: latest.etag,
+        lastModified: latest.lastModified,
+      };
       continue;
     }
     if (!response.ok) {

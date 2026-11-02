@@ -313,6 +313,13 @@ pub fn b64_encode(bytes: &[u8]) -> String {
     B64.encode(bytes)
 }
 
+/// A fingerprint as records name it (base64) in hex, as the server files
+/// bundles; `None` if it isn't one.
+pub fn fingerprint_hex(fingerprint_b64: &str) -> Option<String> {
+    let bytes = B64.decode(fingerprint_b64).ok()?;
+    (bytes.len() == FINGERPRINT_SIZE).then(|| bytes.iter().map(|b| format!("{b:02x}")).collect())
+}
+
 fn sha256(data: &[u8]) -> [u8; 32] {
     Sha256::digest(data).into()
 }
@@ -385,6 +392,14 @@ fn plausible_username(username: &str) -> bool {
     !username.is_empty() && username.chars().count() <= 64
 }
 
+/// Signed bodies must be exactly what serde_json makes of them (as signing
+/// does), so nobody can pad them with whitespace or reorder them: their size
+/// then only depends on what they say.
+fn ensure_canonical<T: Serialize>(body: &T, bytes: &[u8]) -> Result<()> {
+    anyhow::ensure!(serde_json::to_vec(body)? == bytes, "not in canonical form");
+    Ok(())
+}
+
 /// Checks `wire` is a valid next record after `prev` (`None` for a vault's
 /// first record), signed by its author whose bundle is `author_bundle`, and
 /// returns it. `prev` must have been checked already.
@@ -395,6 +410,7 @@ pub fn verify_record(
 ) -> Result<RecordBody> {
     let frames = decode_frames(wire, 2)?;
     let body: RecordBody = serde_json::from_slice(frames[0])?;
+    ensure_canonical(&body, frames[0])?;
     anyhow::ensure!(body.v == 1, "unsupported record version");
     let signer = match prev {
         None => {
@@ -413,12 +429,63 @@ pub fn verify_record(
     };
     let signer = signer.ok_or_else(|| anyhow::anyhow!("the author isn't a member"))?;
     anyhow::ensure!(signer.manage, "the author can't manage members");
+    check_record_signature(&body, signer, frames[0], frames[1], author_bundle)?;
+    check_record_contents(&body)?;
+    Ok(body)
+}
+
+/// Checks the oldest record the server keeps of a vault whose earlier
+/// records it dropped (it keeps the latest few). Who could sign it depends on
+/// the record before, which is gone, so this checks what it can: it is
+/// well-formed and signed by its author with the identity it lists for them.
+/// Like a vault's first record, it is trusted on first sight; members see
+/// whether its managers are people they verified.
+pub fn verify_anchor_record(wire: &[u8], author_bundle: &[u8]) -> Result<RecordBody> {
+    let frames = decode_frames(wire, 2)?;
+    let body: RecordBody = serde_json::from_slice(frames[0])?;
+    ensure_canonical(&body, frames[0])?;
+    anyhow::ensure!(body.v == 1, "unsupported record version");
+    if body.seq == 0 {
+        return verify_record(None, wire, author_bundle);
+    }
+    anyhow::ensure!(
+        body.prev
+            .as_deref()
+            .is_some_and(|p| b64_decode(p, "hash").is_ok_and(|h| h.len() == 32)),
+        "not a record that follows another"
+    );
+    let signer = body
+        .member(&body.author)
+        .ok_or_else(|| anyhow::anyhow!("the author isn't a member"))?;
+    check_record_signature(&body, signer, frames[0], frames[1], author_bundle)?;
+    check_record_contents(&body)?;
+    Ok(body)
+}
+
+/// Checks the record was signed by `signer` (as listed in the record that
+/// gave them the right to) with `author_bundle`.
+fn check_record_signature(
+    body: &RecordBody,
+    signer: &Member,
+    body_bytes: &[u8],
+    signature: &[u8],
+    author_bundle: &[u8],
+) -> Result<()> {
     anyhow::ensure!(
         b64_decode(&signer.fingerprint, "fingerprint")? == fingerprint(author_bundle),
         "the author's identity doesn't match their verified fingerprint"
     );
-    verify(author_bundle, "record", frames[0], frames[1])?;
+    verify(author_bundle, "record", body_bytes, signature)?;
+    // so the oldest record kept after earlier ones are dropped still names
+    // the identity that signed it
+    anyhow::ensure!(
+        body.member(&body.author).is_some(),
+        "the author must stay a member"
+    );
+    Ok(())
+}
 
+fn check_record_contents(body: &RecordBody) -> Result<()> {
     anyhow::ensure!(
         (1..=MAX_MEMBERS).contains(&body.members.len()),
         "a vault has 1 to {MAX_MEMBERS} members"
@@ -449,6 +516,66 @@ pub fn verify_record(
             "bad wrapped key"
         );
     }
+    Ok(())
+}
+
+// ── Leaving ──────────────────────────────────────────────────────────────────
+
+/// A statement that `member` is leaving the vault, signed by them or by a
+/// manager, in the epoch `seq`. The member loses access at once, and the next
+/// record (made by a manager's browser) must remove them. It is only valid in
+/// that epoch, so it can't be replayed to remove them again after they are
+/// added back.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LeaveBody {
+    pub v: u32,
+    pub vault_id: String,
+    pub seq: u64,
+    pub member: String,
+    pub author: String,
+    pub time: u64,
+}
+
+pub fn sign_leave(secret: &[u8], body: &LeaveBody) -> Result<Vec<u8>> {
+    let body = serde_json::to_vec(body)?;
+    let signature = sign(secret, "leave", &body)?;
+    Ok(encode_frames(&[&body, &signature]))
+}
+
+pub fn parse_leave(wire: &[u8]) -> Result<LeaveBody> {
+    let frames = decode_frames(wire, 2)?;
+    Ok(serde_json::from_slice(frames[0])?)
+}
+
+/// Checks a leave statement made in the epoch `record` started (already
+/// checked), signed with `author_bundle`, and returns it.
+pub fn verify_leave(record: &RecordBody, wire: &[u8], author_bundle: &[u8]) -> Result<LeaveBody> {
+    let frames = decode_frames(wire, 2)?;
+    let body: LeaveBody = serde_json::from_slice(frames[0])?;
+    ensure_canonical(&body, frames[0])?;
+    anyhow::ensure!(body.v == 1, "unsupported statement version");
+    anyhow::ensure!(
+        body.vault_id == record.vault_id,
+        "statement of another vault"
+    );
+    anyhow::ensure!(body.seq == record.seq, "statement of another epoch");
+    anyhow::ensure!(
+        record.member(&body.member).is_some(),
+        "the one leaving isn't a member"
+    );
+    let author = record
+        .member(&body.author)
+        .ok_or_else(|| anyhow::anyhow!("the author isn't a member"))?;
+    anyhow::ensure!(
+        body.author == body.member || author.manage,
+        "only the member or a manager can say they're leaving"
+    );
+    anyhow::ensure!(
+        b64_decode(&author.fingerprint, "fingerprint")? == fingerprint(author_bundle),
+        "the author's identity doesn't match their verified fingerprint"
+    );
+    verify(author_bundle, "leave", frames[0], frames[1])?;
     Ok(body)
 }
 
@@ -491,6 +618,20 @@ pub fn archive_of_version(version_wire: &[u8]) -> Result<Vec<u8>> {
     Ok(encode_frames(&[f[0], f[1], f[3]]))
 }
 
+/// The size of a version's encrypted contents (tables and history): what
+/// counts toward a vault's size limit, unlike the signature and body around
+/// them, whose size is fixed.
+pub fn version_content_len(version_wire: &[u8]) -> Result<u64> {
+    let f = decode_frames(version_wire, 4)?;
+    Ok((f[2].len() + f[3].len()) as u64)
+}
+
+/// The size of an archive's encrypted history (see `version_content_len`).
+pub fn archive_content_len(archive_wire: &[u8]) -> Result<u64> {
+    let f = decode_frames(archive_wire, 3)?;
+    Ok(f[2].len() as u64)
+}
+
 fn verify_version_frames(
     record: &RecordBody,
     body_bytes: &[u8],
@@ -500,6 +641,7 @@ fn verify_version_frames(
     author_bundle: &[u8],
 ) -> Result<VersionBody> {
     let body: VersionBody = serde_json::from_slice(body_bytes)?;
+    ensure_canonical(&body, body_bytes)?;
     anyhow::ensure!(body.v == 1, "unsupported version format");
     anyhow::ensure!(body.vault_id == record.vault_id, "version of another vault");
     anyhow::ensure!(body.epoch == record.seq, "version of another epoch");
@@ -738,5 +880,92 @@ mod tests {
         // b can write but not rekey
         let v = sign_version(&b.secret, &body("b", true, b"t", b"h"), b"t", b"h").unwrap();
         assert!(verify_version(&rec, &v, &b.bundle).is_err());
+        // the content length counts the ciphertexts only
+        let v = sign_version(&b.secret, &body("b", false, b"tt", b"hhh"), b"tt", b"hhh").unwrap();
+        assert_eq!(version_content_len(&v).unwrap(), 5);
+        assert_eq!(
+            archive_content_len(&archive_of_version(&v).unwrap()).unwrap(),
+            3
+        );
+    }
+
+    /// Re-signs `wire`'s body with whitespace added, as an attacker could.
+    fn padded(wire: &[u8], secret: &[u8], context: &str) -> Vec<u8> {
+        let f = decode_frames(wire, 2).unwrap();
+        let mut body = f[0].to_vec();
+        body.splice(1..1, *b"    ");
+        let sig = sign(secret, context, &body).unwrap();
+        encode_frames(&[&body, &sig])
+    }
+
+    #[test]
+    fn bodies_must_be_canonical() {
+        let a = user("a");
+        let (r0, _) = record(None, 0, &a, &[(&a, true, true)]);
+        verify_record(None, &r0, &a.bundle).unwrap();
+        let err = verify_record(None, &padded(&r0, &a.secret, "record"), &a.bundle);
+        assert!(err.unwrap_err().to_string().contains("canonical"));
+    }
+
+    #[test]
+    fn authors_stay_members_and_anchors_need_their_own_identity() {
+        let (a, b) = (user("a"), user("b"));
+        let (r0, _) = record(None, 0, &a, &[(&a, true, true), (&b, true, true)]);
+        let b0 = verify_record(None, &r0, &a.bundle).unwrap();
+        // a manager can't sign themselves out of the list
+        let (gone, _) = record(Some(&r0), 1, &a, &[(&b, true, true)]);
+        assert!(verify_record(Some((&b0, &r0)), &gone, &a.bundle).is_err());
+
+        let (r1, _) = record(Some(&r0), 1, &a, &[(&a, false, false), (&b, true, true)]);
+        verify_record(Some((&b0, &r0)), &r1, &a.bundle).unwrap();
+        // with r0 dropped, r1 is checked against the identity it lists for a
+        verify_anchor_record(&r1, &a.bundle).unwrap();
+        assert!(verify_anchor_record(&r1, &b.bundle).is_err());
+        // a first record is checked as one
+        verify_anchor_record(&r0, &a.bundle).unwrap();
+    }
+
+    #[test]
+    fn leave_statements() {
+        let (a, b, c) = (user("a"), user("b"), user("c"));
+        let (r0, _) = record(
+            None,
+            0,
+            &a,
+            &[(&a, true, true), (&b, true, false), (&c, true, false)],
+        );
+        let rec = verify_record(None, &r0, &a.bundle).unwrap();
+        let body = |member: &str, author: &str, seq: u64| LeaveBody {
+            v: 1,
+            vault_id: rec.vault_id.clone(),
+            seq,
+            member: member.to_string(),
+            author: author.to_string(),
+            time: 0,
+        };
+        // the member themselves, or a manager
+        let own = sign_leave(&b.secret, &body("b", "b", 0)).unwrap();
+        assert_eq!(verify_leave(&rec, &own, &b.bundle).unwrap().member, "b");
+        let by_manager = sign_leave(&a.secret, &body("b", "a", 0)).unwrap();
+        verify_leave(&rec, &by_manager, &a.bundle).unwrap();
+        // not another member, nor another epoch, nor someone else's key
+        let by_other = sign_leave(&c.secret, &body("b", "c", 0)).unwrap();
+        assert!(verify_leave(&rec, &by_other, &c.bundle).is_err());
+        let old = sign_leave(&b.secret, &body("b", "b", 1)).unwrap();
+        assert!(verify_leave(&rec, &old, &b.bundle).is_err());
+        let forged = sign_leave(&c.secret, &body("b", "b", 0)).unwrap();
+        assert!(verify_leave(&rec, &forged, &b.bundle).is_err());
+        assert!(verify_leave(&rec, &padded(&own, &b.secret, "leave"), &b.bundle).is_err());
+    }
+
+    #[test]
+    fn account_keys_are_split_from_one_derivation() {
+        let k = crate::derive_account_keys("alice", "pw").unwrap();
+        assert_ne!(k.auth_key, k.encryption_key);
+        let again = crate::derive_account_keys("alice", "pw").unwrap();
+        assert_eq!(k.auth_key, again.auth_key);
+        let other = crate::derive_account_keys("alicf", "pw").unwrap();
+        assert_ne!(k.auth_key, other.auth_key);
+        assert_ne!(crate::auth_key_hash(&k.auth_key), k.auth_key);
     }
 }

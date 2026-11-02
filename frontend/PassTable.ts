@@ -104,6 +104,10 @@ export type SharingData = {
    *  derived; the public half is published on the server. */
   identitySecret: string;
   contacts: Record<string, SharingContact>;
+  /** The shared vaults this user accepted (or created): vault id → the seq
+   *  of its member list when they did. Kept here, in their own encrypted
+   *  vault, so the server can't accept an invitation for them. */
+  accepted?: Record<string, number>;
 };
 
 export type VaultRoot = {
@@ -111,6 +115,9 @@ export type VaultRoot = {
   history: HistoryEntry[];
   /** Only in a user's own vault, once they've set up sharing. */
   sharing?: SharingData;
+  /** Counts up with every save, so a device holding a copy can tell when
+   *  the server sends an older one (see `checkNotOlder`). */
+  revision?: number;
 };
 
 export interface PassTableCallbacks {

@@ -4,7 +4,12 @@ import {
   getVault,
   type CachedVault,
 } from "./deviceStore";
-import { decryptBlob, deriveKey, SALT_LEN } from "./passman_crypto_glue";
+import {
+  decryptBlob,
+  deriveAccountKeys,
+  encryptBlob,
+  toBase64Url,
+} from "./passman_crypto_glue";
 import { serverFetch, serverUrl } from "./serverOrigin";
 import {
   type CellValue,
@@ -84,44 +89,51 @@ export function decodeVault(
   };
 }
 
-function getAlg() {
-  const alg = {
-    32: "SHA-256" as const,
-    48: "SHA-384" as const,
-    64: "SHA-512" as const,
-  }[SALT_LEN];
-  if (alg == null) throw new Error(`Unsupported SALT_LEN: ${SALT_LEN}`);
-  return alg;
-}
-
 /** Derives the auth and encryption keys for a given username + password. */
 export async function deriveUserKeys(
   username: string,
   password: string,
 ): Promise<{ authKeyB64: string; encryptionKey: Uint8Array }> {
-  const alg = getAlg();
-  const escapedUsername = JSON.stringify(username);
-  const enc = new TextEncoder();
+  const { authKey, encryptionKey } = deriveAccountKeys(username, password);
+  return { authKeyB64: toBase64Url(authKey), encryptionKey };
+}
 
-  const saltAuth = new Uint8Array(
-    await crypto.subtle.digest(alg, enc.encode(`auth:${escapedUsername}`)),
-  );
-  const saltEncryption = new Uint8Array(
-    await crypto.subtle.digest(
-      alg,
-      enc.encode(`encryption:${escapedUsername}`),
-    ),
-  );
+/** The server sent an older version of the vault than one this device has
+ *  seen: it wasn't used. */
+export class RollbackError extends Error {
+  constructor() {
+    super(
+      "the server sent an older version of the vault than this device has seen, so it wasn't used. This could mean the server was tampered with",
+    );
+  }
+}
 
-  const authKey = deriveKey(password, saltAuth);
-  const encryptionKey = deriveKey(password, saltEncryption);
+/** Throws a `RollbackError` if `latest` (from the server) is older than
+ *  `known`, a version this device has seen. Without one there's nothing to
+ *  compare with. */
+export function checkNotOlder(
+  latest: VaultRoot,
+  known: VaultRoot | null,
+): void {
+  if (known != null && (latest.revision ?? 0) < (known.revision ?? 0))
+    throw new RollbackError();
+}
 
-  const authKeyB64 = btoa(String.fromCharCode(...authKey))
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_")
-    .replace(/=+$/, "");
-
-  return { authKeyB64, encryptionKey };
+/** Encrypts `data` to replace the server version `base` (null for a new
+ *  account): its revision is one past both. Returns the blob and the
+ *  vault as saved. */
+export function sealVault(
+  encryptionKey: Uint8Array,
+  data: VaultRoot,
+  base: VaultRoot | null,
+): { blob: Uint8Array<ArrayBuffer>; saved: VaultRoot } {
+  const revision = Math.max(data.revision ?? 0, base?.revision ?? 0) + 1;
+  const saved: VaultRoot = { ...data, revision };
+  const json = JSON.stringify(saved);
+  return {
+    blob: encryptBlob(encryptionKey, new TextEncoder().encode(json)),
+    saved: JSON.parse(json) as VaultRoot,
+  };
 }
 
 /** Credentials go in headers rather than the URL so they stay out of server

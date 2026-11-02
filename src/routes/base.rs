@@ -1,26 +1,26 @@
 use crate::{
+    rate_limit::{AuthOutcome, RateLimiter},
     server_policy::{PolicyParams, PolicyStorage},
     shared_vaults::SharedVaults,
 };
-use actix_web::{HttpRequest, HttpResponse, http::header, web};
+use actix_web::{HttpMessage, HttpRequest, HttpResponse, http::header, web};
 use percent_encoding::percent_decode_str;
-use rand::{TryRngCore, rngs::OsRng};
 use serde_json::json;
 use std::{
     collections::HashMap,
     fs::Metadata,
     path::PathBuf,
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use subtle::ConstantTimeEq;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock, mpsc},
+    sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock, Semaphore, mpsc},
     time::{Instant, timeout_at},
 };
 
-pub use passman_crypto::{Argon2Params, HASH_SIZE};
+pub use passman_crypto::HASH_SIZE;
 
 // Credentials are sent in these headers rather than the query string so they
 // stay out of URLs, proxy access logs and the request logging below.
@@ -29,120 +29,136 @@ pub const NEW_AUTH_KEY_HEADER: &str = "Passman-New-Auth-Key";
 /// percent-encoded (`encodeURIComponent`), since header values must be ASCII
 pub const SERVER_PASS_HEADER: &str = "Passman-Server-Pass";
 
-#[repr(C, packed)]
+/// The start of a user's file: the version, then the SHA-512 of their auth
+/// key (see `passman_crypto::auth_key_hash`); their encrypted vault follows.
 pub struct UserDataHeader {
     pub hash: [u8; HASH_SIZE],
-    pub salt: [u8; HASH_SIZE],
 }
 
 impl UserDataHeader {
-    /// Size on disk: the u32 version written by `to_writer`, then hash and salt.
-    pub const SIZE: usize = 4 + std::mem::size_of::<UserDataHeader>();
+    const VERSION: u32 = 2;
+    /// Size on disk: the u32 version, then the hash.
+    pub const SIZE: usize = 4 + HASH_SIZE;
     pub async fn from_reader(f: &mut tokio::fs::File) -> anyhow::Result<Self> {
         let version = f.read_u32_le().await?;
-        if version != 1 {
-            anyhow::bail!("Expected exactly version 1");
+        if version != Self::VERSION {
+            anyhow::bail!("Expected exactly version {}", Self::VERSION);
         }
         let mut hash = [0; HASH_SIZE];
         f.read_exact(&mut hash).await?;
-        let mut salt = [0; HASH_SIZE];
-        f.read_exact(&mut salt).await?;
-        Ok(Self { hash, salt })
+        Ok(Self { hash })
     }
     pub async fn to_writer(&self, f: &mut tokio::fs::File) -> anyhow::Result<()> {
-        f.write_u32_le(1).await?;
+        f.write_u32_le(Self::VERSION).await?;
         f.write_all(&self.hash).await?;
-        f.write_all(&self.salt).await?;
         Ok(())
     }
-    pub async fn from_password(
-        password: &[u8],
-        argon2: &argon2::Argon2<'_>,
-    ) -> anyhow::Result<Self> {
-        let mut salt = [0; HASH_SIZE];
-        let mut hash = [0; HASH_SIZE];
-        OsRng.try_fill_bytes(&mut salt)?;
-        if let Err(e) = argon2.hash_password_into(password, &salt, &mut hash) {
-            anyhow::bail!("{e:?}")
+    pub fn from_auth_key(auth_key: &[u8]) -> Self {
+        Self {
+            hash: passman_crypto::auth_key_hash(auth_key),
         }
-        Ok(Self { hash, salt })
+    }
+    pub fn matches(&self, auth_key: &[u8]) -> bool {
+        let actual = passman_crypto::auth_key_hash(auth_key);
+        bool::from(ConstantTimeEq::ct_eq(&self.hash[..], &actual[..]))
     }
 }
 
 pub type UserT = ();
 
-pub struct GetUser<'a> {
+pub struct GetUser {
     pub user_path: PathBuf,
     pub read_guard: OwnedRwLockReadGuard<UserT>,
     pub read_file: tokio::fs::File,
     pub metadata: Metadata,
     pub udh: UserDataHeader,
-    pub argon2: argon2::Argon2<'a>,
 }
 
-pub struct GetWillMutUser<'a> {
-    pub base: GetUser<'a>,
+pub struct GetWillMutUser {
+    pub base: GetUser,
     pub write_file_path: PathBuf,
 }
 
 pub struct AppState {
     pub policies_and_config: Arc<PolicyStorage>,
     pub server_data_dir: PathBuf,
-    pub argon2_params: Argon2Params,
-    pub user_locks: RwLock<HashMap<String, Arc<RwLock<UserT>>>>,
+    /// Each user's lock, held (shared) while their file is read and
+    /// (exclusive) while it's replaced. The map itself is only held for a
+    /// lookup or insert, never across an await.
+    pub user_locks: Mutex<HashMap<String, Arc<RwLock<UserT>>>>,
     pub shared_vaults: SharedVaults,
+    pub rate_limiter: Arc<RateLimiter>,
+    /// KiB of shared vault uploads that may be held in memory at once.
+    pub upload_budget: Arc<Semaphore>,
+}
+
+fn auth_error(password_header_name: &str) -> HttpResponse {
+    HttpResponse::BadRequest().json(json!({
+        "type": "E_AUTH",
+        "params": ["username", password_header_name],
+        "message": "username or password is incorrect",
+    }))
 }
 
 impl AppState {
+    pub fn user_locks(&self) -> std::sync::MutexGuard<'_, HashMap<String, Arc<RwLock<UserT>>>> {
+        // only ever changed in whole steps, so it's consistent even if a
+        // holder panicked
+        self.user_locks.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Checks `username`'s password (the auth key in `password`), and
+    /// returns their file with their lock held for reading. The outcome is
+    /// noted on `req` for the rate limiter.
+    ///
+    /// The lock is taken before the password is checked, so the check reads
+    /// the credentials the file has while it's locked; a save then upgrades
+    /// the lock to replace the file (see the PUT routes).
     pub async fn get_user(
         &self,
+        req: &HttpRequest,
         username: &str,
         password: &str,
         password_header_name: &str,
-    ) -> Result<GetUser<'_>, HttpResponse> {
+    ) -> Result<GetUser, HttpResponse> {
         validate_username(username)?;
         let password = validate_password(password, password_header_name)?;
-        let user_locks = self.user_locks.read().await;
+        let note = |outcome: AuthOutcome| {
+            req.extensions_mut().insert(outcome);
+        };
+        let failed = |exists: bool| {
+            note(AuthOutcome::Failure {
+                username: username.to_string(),
+                exists,
+            });
+            auth_error(password_header_name)
+        };
         let user_path = self.server_data_dir.join(username);
-        let user_lock = if let Some(x) = user_locks.get(username) {
-            let user_lock = x.clone();
-            drop(user_locks);
-            user_lock
-        } else {
-            if user_path.is_file() {
-                match self.user_locks.upgrade(user_locks).await {
-                    Err(_) => {
-                        return Err(HttpResponse::Conflict().json(json!({
-                            "type": "E_AUTH_CONFLICT",
-                            "params": ["username", password_header_name],
-                            "message": "try again",
-                        })));
-                    }
-                    Ok(mut user_locks) => {
-                        let res = Arc::new(RwLock::new(()));
-                        user_locks.insert(username.to_string(), res.clone());
-                        res
-                    }
+        let existing = self.user_locks().get(username).cloned();
+        let user_lock = match existing {
+            Some(lock) => lock,
+            None => {
+                let is_file = tokio::fs::metadata(&user_path)
+                    .await
+                    .is_ok_and(|m| m.is_file());
+                if !is_file {
+                    return Err(failed(false));
                 }
-            } else {
-                return Err(HttpResponse::BadRequest().json(json!({
-                    "type": "E_AUTH",
-                    "params": ["username", password_header_name],
-                    "message": "username or password is incorrect",
-                })));
+                self.user_locks()
+                    .entry(username.to_string())
+                    .or_insert_with(|| Arc::new(RwLock::new(())))
+                    .clone()
             }
         };
         let read_guard = user_lock.read_owned().await;
         let mut read_file = match tokio::fs::File::open(&user_path).await {
             Err(e) => {
-                eprintln!(
-                    "Error occured attempting to open\n  e={e:?}\n  username={username:?}\n  path={user_path:?}"
-                );
-                return Err(HttpResponse::BadRequest().json(json!({
-                    "type": "E_AUTH",
-                    "params": ["username", password_header_name],
-                    "message": "username or password is incorrect",
-                })));
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    eprintln!(
+                        "Error occured attempting to open\n  e={e:?}\n  username={username:?}\n  path={user_path:?}"
+                    );
+                }
+                return Err(failed(false));
             }
             Ok(o) => o,
         };
@@ -151,35 +167,16 @@ impl AppState {
                 eprintln!(
                     "Error occured attempting to read\n  e={e:?}\n  username={username:?}\n  path={user_path:?}"
                 );
-                return Err(HttpResponse::BadRequest().json(json!({
-                    "type": "E_AUTH",
-                    "params": ["username", password_header_name],
-                    "message": "username or password is incorrect",
-                })));
+                return Err(failed(true));
             }
             Ok(o) => o,
         };
-        let argon2 = self.argon2_params.make();
-        let mut actual_hash = [0; HASH_SIZE];
-        if let Err(e) = argon2.hash_password_into(&password, &udh.salt, &mut actual_hash) {
-            eprintln!(
-                "Error occured attempting to hash password\n  e={e:?}\n  username={username:?}\n  path={user_path:?}"
-            );
-            return Err(HttpResponse::BadRequest().json(json!({
-                "type": "E_AUTH",
-                "params": ["username", password_header_name],
-                "message": "username or password is incorrect",
-            })));
+        if !udh.matches(&password) {
+            return Err(failed(true));
         }
-        let expected: &[u8] = &udh.hash;
-        let actual: &[u8] = &actual_hash;
-        if !bool::from(ConstantTimeEq::ct_eq(expected, actual)) {
-            return Err(HttpResponse::BadRequest().json(json!({
-                "type": "E_AUTH",
-                "params": ["username", password_header_name],
-                "message": "username or password is incorrect",
-            })));
-        }
+        note(AuthOutcome::Success {
+            username: username.to_string(),
+        });
         let metadata = match read_file.metadata().await {
             Err(e) => {
                 eprintln!(
@@ -198,17 +195,17 @@ impl AppState {
             read_guard,
             read_file,
             udh,
-            argon2,
         })
     }
     pub async fn get_will_mut_user(
         &self,
+        req: &HttpRequest,
         username: &str,
         password: &str,
         password_header_name: &str,
-    ) -> Result<GetWillMutUser<'_>, HttpResponse> {
+    ) -> Result<GetWillMutUser, HttpResponse> {
         let base = self
-            .get_user(username, password, password_header_name)
+            .get_user(req, username, password, password_header_name)
             .await?;
         let write_file_path = self.server_data_dir.join(format!(".{}.tmp", username));
         Ok(GetWillMutUser {
@@ -216,6 +213,34 @@ impl AppState {
             write_file_path,
         })
     }
+}
+
+/// Names of the server's own files and folders. None can collide with a
+/// user's file any more (they're in folders starting with '.'), but these
+/// stay unavailable as usernames in case that changes.
+const RESERVED_USERNAMES: &[&str] = &[
+    "shared",
+    "identities",
+    "users",
+    "bundles",
+    "by-fingerprint",
+    "vaults",
+    "records",
+    "archive",
+    "current",
+    "next",
+    "meta.json",
+    "server_data",
+    "policies.json",
+    "config.json",
+    "dist",
+];
+
+/// Whether `username` can't be registered (it's answered as taken).
+pub fn is_reserved_username(username: &str) -> bool {
+    RESERVED_USERNAMES
+        .iter()
+        .any(|reserved| reserved.eq_ignore_ascii_case(username))
 }
 
 pub fn validate_username(username: &str) -> Result<(), HttpResponse> {
@@ -299,12 +324,18 @@ pub fn parse_b64(data: &[u8]) -> anyhow::Result<Vec<u8>> {
     Ok(res)
 }
 
+/// Decodes an auth key (base64 of `HASH_SIZE` bytes).
 pub fn validate_password(password: &str, param_name: &str) -> Result<Vec<u8>, HttpResponse> {
     match parse_b64(password.as_bytes()) {
         Err(e) => Err(HttpResponse::BadRequest().json(json!({
             "type": "E_AUTH",
             "param": param_name,
             "message": format!("invalid base64 password: {}", e),
+        }))),
+        Ok(o) if o.len() != HASH_SIZE => Err(HttpResponse::BadRequest().json(json!({
+            "type": "E_AUTH",
+            "param": param_name,
+            "message": format!("the auth key must be {HASH_SIZE} bytes"),
         }))),
         Ok(o) => Ok(o),
     }
@@ -411,27 +442,25 @@ pub fn policy_params(
 }
 
 /// Streams the rest of `file` (`remain_len` of its `file_len` bytes) as the
-/// response body, holding `guard` meanwhile. `label` names the request in the
-/// log line of a timed-out download.
+/// response body. `label` names the request in the log line of a timed-out
+/// download.
 ///
-/// The guard (a read lock) blocks saves, so a client that reads slowly or
-/// stops reading must not keep it: a task owns the guard and the file and
-/// hands chunks to the response through a one-chunk channel, and gives up
-/// (releasing the guard) at the deadline even if the response stream is never
-/// polled again.
-pub fn streaming_download<G: Send + 'static>(
-    guard: G,
+/// No lock is held meanwhile: files are only ever replaced by renaming a new
+/// one over them, so the open file stays the version it was when opened. A
+/// task owns the file and hands chunks to the response through a one-chunk
+/// channel, and gives up at the deadline (closing the file) even if the
+/// response stream is never polled again.
+pub fn streaming_download(
     mut file: tokio::fs::File,
     file_len: u64,
     remain_len: u64,
-    last_modified: header::HttpDate,
+    last_modified: Option<header::HttpDate>,
     etag: header::EntityTag,
     label: String,
 ) -> HttpResponse {
     let deadline = Instant::now() + download_timeout(file_len);
     let (tx, mut rx) = mpsc::channel::<std::io::Result<web::Bytes>>(1);
     tokio::spawn(async move {
-        let _guard = guard;
         let mut buf = [0u8; 4096];
         loop {
             let chunk = match file.read(&mut buf).await {
@@ -448,11 +477,15 @@ pub fn streaming_download<G: Send + 'static>(
         }
     });
 
-    HttpResponse::Ok()
+    let mut response = HttpResponse::Ok();
+    response
         .content_type("application/octet-stream")
         .insert_header(header::CacheControl(vec![header::CacheDirective::NoCache]))
-        .insert_header(header::LastModified(last_modified))
-        .insert_header(header::ETag(etag))
+        .insert_header(header::ETag(etag));
+    if let Some(last_modified) = last_modified {
+        response.insert_header(header::LastModified(last_modified));
+    }
+    response
         .no_chunking(remain_len)
         .streaming(async_stream::stream! {
             let mut sent = 0u64;
@@ -475,6 +508,15 @@ pub fn streaming_download<G: Send + 'static>(
                 yield Err(e);
             }
         })
+}
+
+/// A `Last-Modified` for a time given in milliseconds since the epoch by a
+/// client (as in a signed version), if it's one a header can hold.
+pub fn http_date_from_millis(millis: u64) -> Option<header::HttpDate> {
+    // HTTP dates end at the year 9999
+    const MAX_SECS: u64 = 253_402_300_799;
+    let secs = millis / 1000;
+    (secs <= MAX_SECS).then(|| header::HttpDate::from(UNIX_EPOCH + Duration::from_secs(secs)))
 }
 
 /// Downloads get at least `DOWNLOAD_MIN_TIMEOUT`, or long enough to finish at
@@ -749,26 +791,22 @@ impl ReadyToReplace {
                     })));
                 }
             };
-            let ReadyToReplaceInner {
-                wf,
-                guard,
-                replace_target_path,
-                write_file_path,
-                ..
-            } = inner;
-            drop(wf);
-            match tokio::fs::rename(&write_file_path, &replace_target_path).await {
+            match tokio::fs::rename(&inner.write_file_path, &inner.replace_target_path).await {
                 Err(e) => {
                     eprintln!(
-                        "Error occured attempting to replace target file with write file\n  e={e:?}\n  write_path={write_file_path:?}\n  target_path={replace_target_path:?}",
+                        "Error occured attempting to replace target file with write file\n  e={e:?}\n  write_path={:?}\n  target_path={:?}",
+                        inner.write_file_path, inner.replace_target_path,
                     );
+                    // put it back so Drop removes the temporary file (and a
+                    // new account's lock, so the username isn't stuck)
+                    self.0 = Some(inner);
                     Err(HttpResponse::InternalServerError().json(json!({
                         "type": "E_USER_WRITE",
                         "message": "Failed to replace user file with written data"
                     })))
                 }
-                _ => Ok(Replaced {
-                    _guard: guard,
+                Ok(()) => Ok(Replaced {
+                    _guard: inner.guard,
                     last_modified,
                     etag,
                 }),
@@ -798,7 +836,7 @@ impl Drop for ReadyToReplace {
                     );
                 }
                 if let Some((username, app_state)) = cleanup_target {
-                    app_state.user_locks.write().await.remove(&username);
+                    app_state.user_locks().remove(&username);
                 }
                 drop(guard);
             });

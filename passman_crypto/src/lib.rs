@@ -4,6 +4,8 @@ use chacha20poly1305::{
     XChaCha20Poly1305, XNonce,
     aead::{Aead, AeadCore, KeyInit, OsRng},
 };
+use hkdf::Hkdf;
+use sha2::{Digest, Sha512};
 use wasm_bindgen::prelude::*;
 
 /// The size in bytes of both the hash output and the salt used with Argon2.
@@ -29,13 +31,14 @@ pub struct Argon2Params {
 }
 
 impl Argon2Params {
-    /// Constructs the default Argon2id v1.3 parameters (19 MiB, 4 passes,
-    /// 1 lane, [`HASH_SIZE`]-byte output).
+    /// Constructs the default Argon2id v1.3 parameters (64 MiB, 3 passes,
+    /// 1 lane, [`HASH_SIZE`]-byte output). One lane, since the browser runs
+    /// it on a single thread: more lanes would only help an attacker's GPUs.
     pub fn new() -> anyhow::Result<Self> {
         Ok(Self {
             algo: argon2::Algorithm::Argon2id,
             ver: argon2::Version::V0x13,
-            params: match argon2::Params::new(19 * 1024, 4, 1, Some(HASH_SIZE)) {
+            params: match argon2::Params::new(64 * 1024, 3, 1, Some(HASH_SIZE)) {
                 Err(e) => anyhow::bail!("params construct error {:?}", e),
                 Ok(o) => o,
             },
@@ -151,6 +154,84 @@ pub fn derive_key(password: &str, salt: &[u8]) -> Result<Vec<u8>, JsError> {
     Ok(output.to_vec())
 }
 
+// ── Account keys ────────────────────────────────────────────────────────────
+
+/// App-wide salts mixed into every account's key derivation. A salt must be
+/// derivable from what the user types (a random one would have to come from
+/// the server, which isn't trusted with it), so the username provides the
+/// per-account part, and these make the result specific to this app: work an
+/// attacker precomputed for a username elsewhere doesn't apply here.
+const ACCOUNT_ARGON2_SALT: &[u8] =
+    b"306089024748bb57f1a0ade46a02fe25ab4edd7f239d472ed651c8238855b160";
+const ACCOUNT_HKDF_SALT: &[u8] =
+    b"3c35885640f9e0054e332b36d19c4d0de179d6fd8231c55c41665952810812f8";
+
+/// The keys of an account, from its username and password.
+pub struct AccountKeys {
+    /// Sent to the server to prove the password (which only stores its
+    /// [`auth_key_hash`]).
+    pub auth_key: [u8; HASH_SIZE],
+    /// Encrypts the vault (XChaCha20-Poly1305 uses its first 32 bytes).
+    pub encryption_key: [u8; HASH_SIZE],
+}
+
+/// The Argon2 salt of `username`'s account.
+fn account_salt(username: &str) -> [u8; HASH_SIZE] {
+    Sha512::new()
+        .chain_update(b"passman account salt v2\0")
+        .chain_update(ACCOUNT_ARGON2_SALT)
+        .chain_update((username.len() as u64).to_le_bytes())
+        .chain_update(username.as_bytes())
+        .finalize()
+        .into()
+}
+
+/// Derives an account's keys: one Argon2id of the password, split into the
+/// auth and encryption keys with HKDF. The server only ever sees the auth
+/// key, from which the encryption key can't be computed; guessing the
+/// password takes one Argon2id per guess either way.
+pub fn derive_account_keys(username: &str, password: &str) -> anyhow::Result<AccountKeys> {
+    let mut master = [0u8; HASH_SIZE];
+    Argon2Params::new()?
+        .make()
+        .hash_password_into(password.as_bytes(), &account_salt(username), &mut master)
+        .map_err(|e| anyhow::anyhow!("Argon2 failed: {e:?}"))?;
+    let hkdf = Hkdf::<Sha512>::new(Some(ACCOUNT_HKDF_SALT), &master);
+    master.fill(0);
+    let mut keys = AccountKeys {
+        auth_key: [0; HASH_SIZE],
+        encryption_key: [0; HASH_SIZE],
+    };
+    hkdf.expand(b"passman auth key v2", &mut keys.auth_key)
+        .map_err(|_| anyhow::anyhow!("HKDF failed"))?;
+    hkdf.expand(b"passman encryption key v2", &mut keys.encryption_key)
+        .map_err(|_| anyhow::anyhow!("HKDF failed"))?;
+    Ok(keys)
+}
+
+/// What the server stores to check an auth key: its SHA-512. The auth key is
+/// already the output of a slow hash with 512 bits of output, so a slow hash
+/// here would add nothing (the encrypted vault, stored with it, can be
+/// attacked at one Argon2id per guess anyway) except a way to load the
+/// server.
+pub fn auth_key_hash(auth_key: &[u8]) -> [u8; HASH_SIZE] {
+    Sha512::new()
+        .chain_update(b"passman auth key hash v2\0")
+        .chain_update(auth_key)
+        .finalize()
+        .into()
+}
+
+/// The auth key followed by the encryption key ([`HASH_SIZE`] bytes each).
+#[wasm_bindgen]
+pub fn account_keys(username: &str, password: &str) -> Result<Vec<u8>, JsError> {
+    let keys = derive_account_keys(username, password).map_err(js_err)?;
+    let mut out = Vec::with_capacity(2 * HASH_SIZE);
+    out.extend_from_slice(&keys.auth_key);
+    out.extend_from_slice(&keys.encryption_key);
+    Ok(out)
+}
+
 // ── Sharing (see `sharing`) ─────────────────────────────────────────────────
 // Thin wrappers turning errors into JS exceptions; records and versions are
 // passed as their signed bytes, and their bodies returned as JSON.
@@ -237,6 +318,39 @@ pub fn record_verify(prev: &[u8], wire: &[u8], author_bundle: &[u8]) -> Result<S
     };
     let body = sharing::verify_record(prev_body.as_ref().map(|b| (b, prev)), wire, author_bundle)
         .map_err(js_err)?;
+    serde_json::to_string(&body).map_err(|e| js_err(e.into()))
+}
+
+/// Checks the oldest record the server still keeps of a vault whose earlier
+/// records were dropped (see `sharing::verify_anchor_record`), and returns
+/// its body as JSON.
+#[wasm_bindgen]
+pub fn record_verify_anchor(wire: &[u8], author_bundle: &[u8]) -> Result<String, JsError> {
+    let body = sharing::verify_anchor_record(wire, author_bundle).map_err(js_err)?;
+    serde_json::to_string(&body).map_err(|e| js_err(e.into()))
+}
+
+/// Signs a statement that a member is leaving (JSON of `sharing::LeaveBody`).
+#[wasm_bindgen]
+pub fn leave_sign(secret: &[u8], body_json: &str) -> Result<Vec<u8>, JsError> {
+    let body: sharing::LeaveBody = serde_json::from_str(body_json).map_err(|e| js_err(e.into()))?;
+    sharing::sign_leave(secret, &body).map_err(js_err)
+}
+
+/// A leave statement's body, before it has been checked (to see who signed
+/// it), as JSON.
+#[wasm_bindgen]
+pub fn leave_body(wire: &[u8]) -> Result<String, JsError> {
+    let body = sharing::parse_leave(wire).map_err(js_err)?;
+    serde_json::to_string(&body).map_err(|e| js_err(e.into()))
+}
+
+/// Checks a leave statement made in the epoch started by `record`, and
+/// returns its body as JSON.
+#[wasm_bindgen]
+pub fn leave_verify(record: &[u8], wire: &[u8], author_bundle: &[u8]) -> Result<String, JsError> {
+    let record = sharing::parse_record(record).map_err(js_err)?;
+    let body = sharing::verify_leave(&record, wire, author_bundle).map_err(js_err)?;
     serde_json::to_string(&body).map_err(|e| js_err(e.into()))
 }
 

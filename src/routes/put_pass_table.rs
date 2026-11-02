@@ -64,7 +64,7 @@ pub async fn route(
             },
         write_file_path,
     } = match app_state
-        .get_will_mut_user(&username, &auth_key, AUTH_KEY_HEADER)
+        .get_will_mut_user(&req, &username, &auth_key, AUTH_KEY_HEADER)
         .await
     {
         Err(e) => return e,

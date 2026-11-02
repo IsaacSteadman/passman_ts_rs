@@ -25,22 +25,82 @@ pub struct LimitPolicyData {
     num_accounts: u32,
     #[cfg_attr(feature = "tsbindings", ts(type = "number"))]
     max_data_size: u64,
-    /// How many shared vaults may be created under this policy (none unless
-    /// set, so existing policies don't gain storage they weren't given).
-    #[serde(default)]
-    max_shared_vaults: u32,
+    /// How many shared vaults may exist under this policy in all (no limit
+    /// but each user's when not set).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "tsbindings", ts(optional))]
+    max_shared_vaults: Option<u32>,
     #[serde(default)]
     num_shared_vaults: u32,
-    /// The size limit of each shared vault created under this policy;
-    /// `MaxDataSize` when not set.
+    /// How many shared vaults each user may create under this policy
+    /// (`DEFAULT_SHARED_VAULTS_PER_USER` when not set). A vault counts
+    /// against its creator until it's deleted, even if they leave it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "tsbindings", ts(optional))]
+    max_shared_vaults_per_user: Option<u32>,
+    /// The size limit of each shared vault created under this policy: its
+    /// encrypted contents (tables and history, including past epochs'),
+    /// not the signatures around them (`DEFAULT_SHARED_VAULT_DATA_SIZE`
+    /// when not set).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "tsbindings", ts(optional, type = "number"))]
     max_shared_vault_data_size: Option<u64>,
-    /// How many members each of those shared vaults may have (unlimited when
-    /// not set, up to the server's `MAX_SHARED_VAULT_MEMBERS`).
+    /// How many members each of those shared vaults may have
+    /// (`DEFAULT_SHARED_VAULT_MEMBERS` when not set).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "tsbindings", ts(optional))]
     max_shared_vault_members: Option<u32>,
+    /// How many member list records each of those vaults keeps; older ones,
+    /// and the history of their epochs, are dropped
+    /// (`DEFAULT_SHARED_VAULT_RECORDS` when not set).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "tsbindings", ts(optional))]
+    max_shared_vault_records: Option<u32>,
+}
+
+pub const DEFAULT_SHARED_VAULTS_PER_USER: u32 = 4;
+pub const DEFAULT_SHARED_VAULT_DATA_SIZE: u64 = 16 * 1024;
+pub const DEFAULT_SHARED_VAULT_MEMBERS: u32 = 8;
+pub const DEFAULT_SHARED_VAULT_RECORDS: u32 = 16;
+/// The most any shared vault can have, whatever the policy (also the limits
+/// of vaults created with the server access password or a root policy).
+pub const HARD_MAX_SHARED_VAULT_DATA_SIZE: u64 = 64 * 1024 * 1024;
+pub const HARD_MAX_SHARED_VAULT_MEMBERS: u32 = passman_crypto::sharing::MAX_MEMBERS as u32;
+pub const HARD_MAX_SHARED_VAULT_RECORDS: u32 = 64;
+
+/// A shared vault's limits, set from its policy when it's created and kept
+/// with it, so later policy changes don't shrink it under its contents.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct VaultLimits {
+    pub max_data_size: u64,
+    pub max_members: u32,
+    pub max_records: u32,
+}
+
+impl VaultLimits {
+    pub const HARD_MAX: VaultLimits = VaultLimits {
+        max_data_size: HARD_MAX_SHARED_VAULT_DATA_SIZE,
+        max_members: HARD_MAX_SHARED_VAULT_MEMBERS,
+        max_records: HARD_MAX_SHARED_VAULT_RECORDS,
+    };
+
+    fn of_policy(data: &LimitPolicyData) -> Self {
+        Self {
+            max_data_size: data
+                .max_shared_vault_data_size
+                .unwrap_or(DEFAULT_SHARED_VAULT_DATA_SIZE)
+                .min(HARD_MAX_SHARED_VAULT_DATA_SIZE),
+            max_members: data
+                .max_shared_vault_members
+                .unwrap_or(DEFAULT_SHARED_VAULT_MEMBERS)
+                .clamp(1, HARD_MAX_SHARED_VAULT_MEMBERS),
+            max_records: data
+                .max_shared_vault_records
+                .unwrap_or(DEFAULT_SHARED_VAULT_RECORDS)
+                .clamp(1, HARD_MAX_SHARED_VAULT_RECORDS),
+        }
+    }
 }
 
 impl LimitPolicyData {
@@ -193,16 +253,6 @@ impl LenReadChecker {
     }
 }
 
-/// The limits of one shared vault: those of the policy it was created under,
-/// whichever credentials its members use.
-pub struct SharedVaultLimits {
-    pub max_data_size: Option<u64>,
-    pub max_members: Option<u32>,
-    /// False once that policy was removed or made a null policy: the vault
-    /// can still be read and left, but not changed.
-    pub writable: bool,
-}
-
 /// A shared vault counted against a policy by `create_shared_vault_hook`;
 /// the count is given back on drop unless `commit()` has been called.
 pub struct SharedVaultSlot {
@@ -210,6 +260,11 @@ pub struct SharedVaultSlot {
     /// password), which sets its limits and is given the count back when the
     /// vault is deleted.
     pub policy_ns: Option<String>,
+    /// The new vault's limits.
+    pub limits: VaultLimits,
+    /// How many shared vaults its creator may have created (`None`: no
+    /// limit).
+    pub max_per_user: Option<u32>,
     rollback: Option<RollbackHandle>,
 }
 
@@ -221,12 +276,21 @@ impl SharedVaultSlot {
     }
 }
 
+/// A wrong server or policy password (counted against the client's IP).
 fn ns_error() -> HttpResponse {
-    HttpResponse::BadRequest().json(json!({
+    let mut response = HttpResponse::BadRequest().json(json!({
         "type": "E_SERVER_NS",
         "params": ["server_ns", "Passman-Server-Pass"],
         "message": "unrecognized server_ns or server_pass"
-    }))
+    }));
+    response
+        .extensions_mut()
+        .insert(crate::rate_limit::ServerPassRejected);
+    response
+}
+
+fn passwords_match(expected: &str, given: &str) -> bool {
+    subtle::ConstantTimeEq::ct_eq(expected.as_bytes(), given.as_bytes()).into()
 }
 
 fn policy_error(action: &str, policy_message: String) -> HttpResponse {
@@ -340,66 +404,72 @@ impl PolicyStorage {
     }
 
     /// Counts a new shared vault against the request's policy, if it allows
-    /// one more.
+    /// one more, and returns the vault's limits.
     pub async fn create_shared_vault_hook(
         self: Arc<PolicyStorage>,
         params: PolicyParams,
     ) -> Result<SharedVaultSlot, HttpResponse> {
         let Some(ns) = params.server_ns else {
-            return if subtle::ConstantTimeEq::ct_eq(
-                self.config.server_access_password.as_bytes(),
-                params.server_pass.as_bytes(),
-            )
-            .into()
-            {
+            return if passwords_match(&self.config.server_access_password, &params.server_pass) {
                 Ok(SharedVaultSlot {
                     policy_ns: None,
+                    limits: VaultLimits::HARD_MAX,
+                    max_per_user: None,
                     rollback: None,
                 })
             } else {
                 Err(ns_error())
             };
         };
+        // no await while holding it, so it's never held for long
         let mut writer = self.policies.write().await;
         let Some(PolicyConfig { password, inner }) = writer.get_mut(&ns) else {
             return Err(ns_error());
         };
-        if !bool::from(subtle::ConstantTimeEq::ct_eq(
-            password.as_bytes(),
-            params.server_pass.as_bytes(),
-        )) {
+        if !passwords_match(password, &params.server_pass) {
             return Err(ns_error());
         }
-        let rollback = match inner {
+        let (limits, max_per_user, rollback) = match inner {
             InnerPolicyConfig::NullPolicy => {
                 return Err(policy_error(
                     "create_shared_vault",
                     "null policy".to_string(),
                 ));
             }
-            InnerPolicyConfig::RootPolicy => None,
+            InnerPolicyConfig::RootPolicy => (VaultLimits::HARD_MAX, None, None),
             InnerPolicyConfig::LimitedPolicy { data } => {
-                if data.num_shared_vaults >= data.max_shared_vaults {
+                if let Some(max) = data.max_shared_vaults
+                    && data.num_shared_vaults >= max
+                {
                     return Err(policy_error(
                         "create_shared_vault",
                         format!(
-                            "number of shared vaults {} has reached the maximum {}",
-                            data.num_shared_vaults, data.max_shared_vaults
+                            "number of shared vaults {} has reached the maximum {max}",
+                            data.num_shared_vaults
                         ),
                     ));
                 }
                 data.num_shared_vaults += 1;
                 self.notify.notify_one();
-                Some(RollbackHandle {
-                    committed: false,
-                    key: ns.clone(),
-                    policy_storage: self.clone(),
-                    counter: Counter::SharedVaults,
-                })
+                (
+                    VaultLimits::of_policy(data),
+                    Some(
+                        data.max_shared_vaults_per_user
+                            .unwrap_or(DEFAULT_SHARED_VAULTS_PER_USER),
+                    ),
+                    Some(RollbackHandle {
+                        committed: false,
+                        key: ns.clone(),
+                        policy_storage: self.clone(),
+                        counter: Counter::SharedVaults,
+                    }),
+                )
             }
         };
         Ok(SharedVaultSlot {
             policy_ns: Some(ns),
+            limits,
+            max_per_user,
             rollback,
         })
     }
@@ -412,84 +482,45 @@ impl PolicyStorage {
         }
     }
 
-    pub async fn shared_vault_limits(&self, policy_ns: Option<&str>) -> SharedVaultLimits {
-        const UNLIMITED: SharedVaultLimits = SharedVaultLimits {
-            max_data_size: None,
-            max_members: None,
-            writable: true,
-        };
+    /// False once the policy a shared vault was created under was removed or
+    /// made a null policy: the vault can still be read and left, but not
+    /// changed.
+    pub async fn shared_vault_writable(&self, policy_ns: Option<&str>) -> bool {
         let Some(ns) = policy_ns else {
-            return UNLIMITED;
+            return true;
         };
-        match self.policies.read().await.get(ns).map(|p| &p.inner) {
-            Some(InnerPolicyConfig::RootPolicy) => UNLIMITED,
-            Some(InnerPolicyConfig::LimitedPolicy { data }) => SharedVaultLimits {
-                max_data_size: Some(
-                    data.max_shared_vault_data_size
-                        .unwrap_or(data.max_data_size),
-                ),
-                max_members: data.max_shared_vault_members,
-                writable: true,
-            },
-            Some(InnerPolicyConfig::NullPolicy) | None => SharedVaultLimits {
-                max_data_size: None,
-                max_members: None,
-                writable: false,
-            },
-        }
+        matches!(
+            self.policies.read().await.get(ns).map(|p| &p.inner),
+            Some(InnerPolicyConfig::RootPolicy | InnerPolicyConfig::LimitedPolicy { .. })
+        )
     }
 
     pub async fn read_account_server_policy_auth(
         &self,
         params: PolicyParams,
     ) -> Result<LenReadChecker, HttpResponse> {
-        if let Some(ns) = params.server_ns {
-            let reader = self.policies.read().await;
-            let PolicyConfig { password, inner } = match reader.get(&ns) {
-                None => {
-                    return Err(HttpResponse::BadRequest().json(json!({
-                        "type": "E_SERVER_NS",
-                        "params": ["server_ns", "Passman-Server-Pass"],
-                        "message": "unrecognized server_ns or server_pass"
-                    })));
-                }
-                Some(s) => s,
-            };
-            if subtle::ConstantTimeEq::ct_eq(password.as_bytes(), params.server_pass.as_bytes())
-                .into()
-            {
-                match inner {
-                    InnerPolicyConfig::LimitedPolicy { data } => Ok(LenReadChecker::Limited {
-                        max_data_size: data.max_data_size,
-                    }),
-                    InnerPolicyConfig::NullPolicy => Err(HttpResponse::BadRequest().json(json!({
-                        "type": "E_POLICY",
-                        "action": "read_account",
-                        "message": "action was blocked by server policy",
-                        "policy_message": "null policy"
-                    }))),
-                    InnerPolicyConfig::RootPolicy => Ok(LenReadChecker::AlwaysPass),
-                }
+        let Some(ns) = params.server_ns else {
+            return if passwords_match(&self.config.server_access_password, &params.server_pass) {
+                Ok(LenReadChecker::AlwaysPass)
             } else {
-                Err(HttpResponse::BadRequest().json(json!({
-                    "type": "E_SERVER_NS",
-                    "params": ["server_ns", "Passman-Server-Pass"],
-                    "message": "unrecognized server_ns or server_pass"
-                })))
+                Err(ns_error())
+            };
+        };
+        let reader = self.policies.read().await;
+        let Some(PolicyConfig { password, inner }) = reader.get(&ns) else {
+            return Err(ns_error());
+        };
+        if !passwords_match(password, &params.server_pass) {
+            return Err(ns_error());
+        }
+        match inner {
+            InnerPolicyConfig::LimitedPolicy { data } => Ok(LenReadChecker::Limited {
+                max_data_size: data.max_data_size,
+            }),
+            InnerPolicyConfig::NullPolicy => {
+                Err(policy_error("read_account", "null policy".to_string()))
             }
-        } else if subtle::ConstantTimeEq::ct_eq(
-            self.config.server_access_password.as_bytes(),
-            params.server_pass.as_bytes(),
-        )
-        .into()
-        {
-            Ok(LenReadChecker::AlwaysPass)
-        } else {
-            Err(HttpResponse::BadRequest().json(json!({
-                "type": "E_SERVER_NS",
-                "params": ["server_ns", "Passman-Server-Pass"],
-                "message": "unrecognized server_ns or server_pass"
-            })))
+            InnerPolicyConfig::RootPolicy => Ok(LenReadChecker::AlwaysPass),
         }
     }
 
@@ -497,98 +528,49 @@ impl PolicyStorage {
         self: Arc<PolicyStorage>,
         params: PolicyParams,
     ) -> Result<LenAccumChecker, HttpResponse> {
-        if let Some(ns) = params.server_ns {
-            let reader = self.policies.read().await;
-            let PolicyConfig { password, .. } = match reader.get(&ns) {
-                None => {
-                    return Err(HttpResponse::BadRequest().json(json!({
-                        "type": "E_SERVER_NS",
-                        "params": ["server_ns", "Passman-Server-Pass"],
-                        "message": "unrecognized server_ns or server_pass"
-                    })));
-                }
-                Some(s) => s,
-            };
-            if subtle::ConstantTimeEq::ct_eq(password.as_bytes(), params.server_pass.as_bytes())
-                .into()
-            {
-                let mut writer = match self.policies.upgrade(reader).await {
-                    Ok(o) => o,
-                    Err(_) => {
-                        eprintln!("Failed to upgrade reader lock: another upgrade was in progress");
-                        return Err(HttpResponse::Conflict().json(json!({
-                            "type": "E_POLICY_CONFLICT",
-                            "action": "read_account",
-                            "message": "action was conflicted, retry recommended"
-                        })));
-                    }
-                };
-                let inner = match writer.get_mut(&ns) {
-                    None => {
-                        return Err(HttpResponse::BadRequest().json(json!({
-                            "type": "E_SERVER_NS",
-                            "params": ["server_ns", "Passman-Server-Pass"],
-                            "message": "unrecognized server_ns or server_pass"
-                        })));
-                    }
-                    Some(s) => &mut s.inner,
-                };
-                match inner {
-                    InnerPolicyConfig::NullPolicy => Err(HttpResponse::BadRequest().json(json!({
-                        "type": "E_POLICY",
-                        "action": "read_account",
-                        "message": "action was blocked by server policy",
-                        "policy_message": "null policy"
-                    }))),
-                    InnerPolicyConfig::RootPolicy => Ok(LenAccumChecker::AlwaysPass),
-                    InnerPolicyConfig::LimitedPolicy { data } => {
-                        if data.num_accounts >= data.max_accounts {
-                            Err(HttpResponse::BadRequest().json(json!({
-                                "type": "E_POLICY",
-                                "action": "create_account",
-                                "message": "action was blocked by server policy",
-                                "policy_message": format!(
-                                    "number of accounts {} has reached the maximum {}",
-                                    data.num_accounts, data.max_accounts
-                                )
-                            })))
-                        } else {
-                            data.num_accounts += 1;
-                            self.notify.notify_one();
-
-                            Ok(LenAccumChecker::Limited {
-                                action: "create_account".to_string(),
-                                max_data_size: data.max_data_size,
-                                rollback: Some(RollbackHandle {
-                                    committed: false,
-                                    key: ns.clone(),
-                                    policy_storage: self.clone(),
-                                    counter: Counter::Accounts,
-                                }),
-                            })
-                        }
-                    }
-                }
+        let Some(ns) = params.server_ns else {
+            return if passwords_match(&self.config.server_access_password, &params.server_pass) {
+                Ok(LenAccumChecker::AlwaysPass)
             } else {
-                Err(HttpResponse::BadRequest().json(json!({
-                    "type": "E_SERVER_NS",
-                    "params": ["server_ns", "Passman-Server-Pass"],
-                    "message": "unrecognized server_ns or server_pass"
-                })))
+                Err(ns_error())
+            };
+        };
+        // no await while holding it, so it's never held for long
+        let mut writer = self.policies.write().await;
+        let Some(PolicyConfig { password, inner }) = writer.get_mut(&ns) else {
+            return Err(ns_error());
+        };
+        if !passwords_match(password, &params.server_pass) {
+            return Err(ns_error());
+        }
+        match inner {
+            InnerPolicyConfig::NullPolicy => {
+                Err(policy_error("create_account", "null policy".to_string()))
             }
-        } else if subtle::ConstantTimeEq::ct_eq(
-            self.config.server_access_password.as_bytes(),
-            params.server_pass.as_bytes(),
-        )
-        .into()
-        {
-            Ok(LenAccumChecker::AlwaysPass)
-        } else {
-            Err(HttpResponse::BadRequest().json(json!({
-                "type": "E_SERVER_NS",
-                "params": ["server_ns", "Passman-Server-Pass"],
-                "message": "unrecognized server_ns or server_pass"
-            })))
+            InnerPolicyConfig::RootPolicy => Ok(LenAccumChecker::AlwaysPass),
+            InnerPolicyConfig::LimitedPolicy { data } => {
+                if data.num_accounts >= data.max_accounts {
+                    return Err(policy_error(
+                        "create_account",
+                        format!(
+                            "number of accounts {} has reached the maximum {}",
+                            data.num_accounts, data.max_accounts
+                        ),
+                    ));
+                }
+                data.num_accounts += 1;
+                self.notify.notify_one();
+                Ok(LenAccumChecker::Limited {
+                    action: "create_account".to_string(),
+                    max_data_size: data.max_data_size,
+                    rollback: Some(RollbackHandle {
+                        committed: false,
+                        key: ns.clone(),
+                        policy_storage: self.clone(),
+                        counter: Counter::Accounts,
+                    }),
+                })
+            }
         }
     }
 
@@ -596,55 +578,30 @@ impl PolicyStorage {
         &self,
         params: PolicyParams,
     ) -> Result<LenAccumChecker, HttpResponse> {
-        if let Some(ns) = params.server_ns {
-            let reader = self.policies.read().await;
-            let PolicyConfig { password, inner } = match reader.get(&ns) {
-                None => {
-                    return Err(HttpResponse::BadRequest().json(json!({
-                        "type": "E_SERVER_NS",
-                        "params": ["server_ns", "Passman-Server-Pass"],
-                        "message": "unrecognized server_ns or server_pass"
-                    })));
-                }
-                Some(s) => s,
-            };
-            if subtle::ConstantTimeEq::ct_eq(password.as_bytes(), params.server_pass.as_bytes())
-                .into()
-            {
-                match inner {
-                    InnerPolicyConfig::NullPolicy => Err(HttpResponse::BadRequest().json(json!({
-                        "type": "E_POLICY",
-                        "action": "read_account",
-                        "message": "action was blocked by server policy",
-                        "policy_message": "null policy"
-                    }))),
-                    InnerPolicyConfig::RootPolicy => Ok(LenAccumChecker::AlwaysPass),
-                    InnerPolicyConfig::LimitedPolicy { data } => Ok(LenAccumChecker::Limited {
-                        action: "create_account".to_string(),
-                        max_data_size: data.max_data_size,
-                        rollback: None,
-                    }),
-                }
+        let Some(ns) = params.server_ns else {
+            return if passwords_match(&self.config.server_access_password, &params.server_pass) {
+                Ok(LenAccumChecker::AlwaysPass)
             } else {
-                Err(HttpResponse::BadRequest().json(json!({
-                    "type": "E_SERVER_NS",
-                    "params": ["server_ns", "Passman-Server-Pass"],
-                    "message": "unrecognized server_ns or server_pass"
-                })))
+                Err(ns_error())
+            };
+        };
+        let reader = self.policies.read().await;
+        let Some(PolicyConfig { password, inner }) = reader.get(&ns) else {
+            return Err(ns_error());
+        };
+        if !passwords_match(password, &params.server_pass) {
+            return Err(ns_error());
+        }
+        match inner {
+            InnerPolicyConfig::NullPolicy => {
+                Err(policy_error("update_account", "null policy".to_string()))
             }
-        } else if subtle::ConstantTimeEq::ct_eq(
-            self.config.server_access_password.as_bytes(),
-            params.server_pass.as_bytes(),
-        )
-        .into()
-        {
-            Ok(LenAccumChecker::AlwaysPass)
-        } else {
-            Err(HttpResponse::BadRequest().json(json!({
-                "type": "E_SERVER_NS",
-                "params": ["server_ns", "Passman-Server-Pass"],
-                "message": "unrecognized server_ns or server_pass"
-            })))
+            InnerPolicyConfig::RootPolicy => Ok(LenAccumChecker::AlwaysPass),
+            InnerPolicyConfig::LimitedPolicy { data } => Ok(LenAccumChecker::Limited {
+                action: "update_account".to_string(),
+                max_data_size: data.max_data_size,
+                rollback: None,
+            }),
         }
     }
 }
@@ -665,6 +622,8 @@ mod tests {
             debug: false,
             pretty_policies_json: None,
             server_access_password: "root".to_string(),
+            rate_limit: Default::default(),
+            max_buffered_upload_bytes: 1 << 20,
         };
         PolicyStorage::new(dir, config).await.unwrap().0
     }

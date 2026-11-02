@@ -11,11 +11,14 @@ import { matchingRows, searchTerms } from "./vaultSearch";
 import { keyProtector, unlockErrorMessage } from "./keyProtector";
 import type { LoginResult, SyncedVault } from "./loginArea";
 import {
+  checkNotOlder,
   credentialHeaders,
   decodeVault,
   deriveUserKeys,
   describeError,
   downloadVault,
+  RollbackError,
+  sealVault,
 } from "./loginArea";
 import { mergeVaults, valuesEqual, vaultsEqual } from "./merge";
 import {
@@ -212,13 +215,18 @@ export function initContentArea(
     }
     reachedServer = true;
     try {
+      const data = decodeVault(currentEncryptionKey, download.blob);
+      // the version this session (or device) last had is the oldest the
+      // server may send
+      checkNotOlder(data, baseData);
       return {
-        data: decodeVault(currentEncryptionKey, download.blob),
+        data,
         blob: download.blob,
         etag: download.etag,
         lastModified: download.lastModified,
       };
     } catch (e) {
+      if (e instanceof RollbackError) return `Not updated: ${e.message}`;
       return `Refresh error: ${e}`;
     }
   }
@@ -340,10 +348,10 @@ export function initContentArea(
 
         statSpan.textContent = "Saving…";
         try {
-          const json = JSON.stringify(currentData);
-          const blob = encryptBlob(
+          const { blob, saved } = sealVault(
             currentEncryptionKey,
-            new TextEncoder().encode(json),
+            currentData,
+            baseData,
           );
 
           const url = serverUrl("/pass-table");
@@ -388,8 +396,9 @@ export function initContentArea(
 
           currentEtag = response.headers.get("ETag");
           currentLastModified = response.headers.get("Last-Modified");
-          baseData = JSON.parse(json) as VaultRoot;
+          baseData = saved;
           baseBlob = blob;
+          currentData.revision = saved.revision;
           void persistState();
           statSpan.textContent = currentLastModified
             ? `Last saved: ${currentLastModified}`
@@ -496,7 +505,9 @@ export function initContentArea(
     let data: VaultRoot;
     try {
       data = decodeVault(keys.encryptionKey, download.blob);
+      checkNotOlder(data, baseData);
     } catch (e) {
+      if (e instanceof RollbackError) return `Not used: ${e.message}.`;
       return `Decryption failed: ${e}`;
     }
     await enqueue(async () => {
@@ -1125,10 +1136,10 @@ export function initContentArea(
           return;
         }
         chgPassStatus.textContent = "Encrypting…";
-        const json = JSON.stringify(currentData);
-        const blob = encryptBlob(
+        const { blob, saved } = sealVault(
           newEncryptionKey,
-          new TextEncoder().encode(json),
+          currentData,
+          baseData,
         );
 
         chgPassStatus.textContent = "Saving…";
@@ -1168,8 +1179,9 @@ export function initContentArea(
         currentEncryptionKey = newEncryptionKey;
         currentEtag = response.headers.get("ETag");
         currentLastModified = response.headers.get("Last-Modified");
-        baseData = JSON.parse(json) as VaultRoot;
+        baseData = saved;
         baseBlob = blob;
+        currentData.revision = saved.revision;
         // re-encrypts this device's copy with the new key
         void persistState();
         void keysChanged();

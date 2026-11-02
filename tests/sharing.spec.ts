@@ -144,6 +144,24 @@ async function createVault(page: Page, name: string): Promise<void> {
 const member = (page: Page, vault: string, name: string) =>
   vaultCard(page, vault).locator(`.pm-member-list li[data-username='${name}']`);
 
+/** Accepts the invitation to `vault` (the inviter must be verified). */
+async function acceptInvitation(page: Page, vault: string): Promise<void> {
+  const card = vaultCard(page, vault);
+  await expect(card.locator(":scope > summary .pm-shared-meta")).toContainText(
+    "Invitation from",
+  );
+  await card.locator(":scope > summary").click();
+  // recorded in the user's own vault
+  const saved = page.waitForResponse(
+    (r) =>
+      r.url().includes("/pass-table?") &&
+      r.request().method() === "PUT" &&
+      r.status() === 200,
+  );
+  await card.locator("button[name='accept-invitation']").click();
+  await saved;
+}
+
 test.describe("Shared vaults", () => {
   test("verified members share a vault, with permissions and new keys on member changes", async ({
     browser,
@@ -184,13 +202,15 @@ test.describe("Shared vaults", () => {
       "✓ verified by you",
     );
 
-    // bob sees it after logging in again, and can edit it
+    // bob sees it after logging in again, as an invitation from alice
+    // (whom he verified), and once he accepts it he can edit it
     await login(bob.page, bob.name);
     const bobCard = vaultCard(bob.page, "Family");
+    await expect(bobCard.locator(".pm-card-name")).toHaveCount(0);
+    await acceptInvitation(bob.page, "Family");
     await expect(
       bobCard.locator(":scope > summary .pm-shared-meta"),
     ).toContainText("Can edit · 2 members");
-    await bobCard.locator(":scope > summary").click();
     await expect(bobCard.locator(".pm-card-name")).toHaveText(["Wifi"]);
     await expect(member(bob.page, "Family", alice.name)).toContainText(
       "✓ verified by you",
@@ -275,16 +295,23 @@ test.describe("Shared vaults", () => {
     await card.locator(".pm-add-member button:has-text('Add')").click();
     await applyMembers(alice.page, "Work");
 
-    // carol leaves
+    // carol gets an invitation she can't accept until she verifies alice;
+    // she declines it instead
     await login(carol.page, carol.name);
     const carolCard = vaultCard(carol.page, "Work");
     await carolCard.locator(":scope > summary").click();
-    // carol hasn't verified alice, who manages it
     await expect(carolCard.locator(".pm-unverified-managers")).toContainText(
-      `managed by ${alice.name}, whose identity you haven't verified`,
+      `first verify ${alice.name}'s identity`,
     );
+    await expect(
+      carolCard.locator("button[name='accept-invitation']"),
+    ).toBeDisabled();
     carol.page.once("dialog", (dialog) => dialog.accept());
-    await carolCard.locator("button:has-text('Leave')").click();
+    const declined = carol.page.waitForResponse(
+      (r) => /\/leave/.test(r.url()) && r.request().method() === "POST",
+    );
+    await carolCard.locator("button[name='decline-invitation']").click();
+    expect((await declined).status()).toBe(200);
     await expect(carolCard).toHaveCount(0);
 
     // alice's browser removes her (with a new key) when it next loads

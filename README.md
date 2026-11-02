@@ -14,6 +14,58 @@ It downloads the published crate, verifies its SHA-256, applies the patch and
 writes the result to `.patched-crates/` (gitignored), where
 `[patch.crates-io]` in `Cargo.toml` points.
 
+## Running the server
+
+The server reads `config.json` and `policies.json` from `CARGO_MANIFEST_DIR`
+and keeps its data in `server_data/` there. It listens on `127.0.0.1`, on the
+port in the `PORT` environment variable (which the deployment sets), else
+`Port` in `config.json` (8080 by default), behind a reverse proxy that
+terminates TLS and passes the client's address in `X-Real-IP`.
+
+`config.json`:
+
+| Field                    | Default  | Meaning                                                                 |
+| ------------------------ | -------- | ----------------------------------------------------------------------- |
+| `ServerAccessPassword`   | required | unlimited access (accounts, shared vaults)                              |
+| `Port`                   | `8080`   | when `PORT` isn't set                                                   |
+| `MaxBufferedUploadBytes` | 256 MiB  | shared vault uploads held in memory at once (more are refused with 503) |
+| `RateLimit`              | below    | request rates, bans and throttling                                      |
+
+**Rate limiting.** Each client IP (an IPv6 /64 counts as one) may make
+`RequestsPerSecond` requests (20) with bursts of `RequestBurst` (200). Failed
+logins (a wrong server or policy password, or a wrong account password)
+count against the IP: after `BadIpFailures` (3) within `FailureWindowSecs`
+(15 min) it is a "bad" IP, and after `FailuresToBan` (10) it is banned for
+`BanSecs` (15 min), twice as long each further time within a day, up to
+`MaxBanSecs` (24 h). An account with `AccountFailuresToThrottle` (5) failures
+from anywhere is throttled until a window passes without failures: an IP
+that hasn't logged into it in the last `TrustedIpDays` (30) waits
+`AccountDelaysSecs` (1, 5, 10, 30, then 60 s) before each attempt at it, twice
+as long if it's a bad IP, whose failures there then count double. The account
+is never locked, so its owner always gets in after a short wait (the apps
+wait by themselves), and at once from where they logged in before. Every
+table is bounded (`MaxTrackedIps`, `MaxTrackedAccounts`, `MaxIpsPerAccount`).
+`"RateLimit": {"Enabled": false}` turns it off, for local testing only.
+
+**Web app headers.** Pages get a Content Security Policy allowing only the
+app's own scripts and styles (and, by hash, the page's own inline ones),
+WebAssembly, and no framing; every response gets `nosniff` and no referrer.
+The web app is served by the server it talks to, so it can't protect against
+a compromised server the way the extension and the Android app (whose code
+comes with them) do.
+
+## Accounts and keys
+
+An account's keys are derived in the browser from its username and password:
+one Argon2id (64 MiB, 3 passes) of the password, salted with the username and
+an app-wide salt, split with HKDF into an auth key and an encryption key. The
+server only sees the auth key, and stores its SHA-512 (a slow hash would add
+nothing: the encrypted vault stored next to it can be attacked at one Argon2id
+per guess anyway, and it would let anyone with the server password load the
+server). The vault is encrypted with XChaCha20-Poly1305 and carries a revision
+number, so a device that has seen a version refuses an older one from the
+server.
+
 ## Browser extensions
 
 `extension/` holds extensions for Chromium browsers (Chrome, Edge, Brave, …),
@@ -111,30 +163,55 @@ code in `passman_crypto/src/sharing.rs`, before storing it).
   fingerprint: in person by scanning each other's QR codes (which hold only the
   username and fingerprint), or by reading a safety number to each other on a
   call. Vaults managed by someone the user hasn't verified carry a warning.
+- **Invitations.** Anyone can add a user to a vault, so it first shows as an
+  invitation (who added them, the members and whether they're verified), and
+  isn't used anywhere (in the vault list, the extension or autofill) until
+  they accept it, which needs the inviter to be verified. Accepting is
+  recorded in the user's own vault, so the server can't accept for them.
+  Declining is leaving.
 - **Member lists** are a chain of records, each signed by a member who could
-  manage members in the previous one. Every record starts an epoch with a new
-  random key, wrapped for each member, so removed members can't read anything
-  saved afterwards and new members can't read anything saved before. Members
-  can edit or only read, and can manage members or not.
+  manage members in the previous one (and who stays in it). Every record
+  starts an epoch with a new random key, wrapped for each member, so removed
+  members can't read anything saved afterwards and new members can't read
+  anything saved before. Members can edit or only read, and can manage
+  members or not. The server keeps a vault's latest records only; a device
+  without the older ones checks the chain from the oldest kept, which, like a
+  vault's first record, is trusted on first sight.
+- **Leaving.** A member leaves (or declines) with a statement they sign, or
+  a manager signs one for them; it's only valid in the epoch it was made in.
+  The server stops serving them the vault at once, and a manager's browser
+  removes them (with a new key) once it has checked the statement, so the
+  server can't get anyone removed on its own.
 - **Versions** of a vault are signed by their author, who must be allowed to
   edit. Each epoch's history is kept separately (encrypted with that epoch's
   key), so members only see the history from when they joined.
+- **Size.** What counts toward a vault's size is its encrypted tables and
+  history, including past epochs' (not the signatures around them). To fit,
+  the server drops the oldest past epochs' history first, then the app drops
+  the oldest entries of the current history, down to the vault's minimum
+  (a setting in the vault); the app warns before either happens, and before a
+  save that would still be too large (and so is refused).
 - **Offline.** For accounts remembered on the device, shared vaults are kept
   there too and can be changed offline; changes are saved when back online,
   as long as the user can still edit the vault (otherwise they can be copied
-  to their own vault).
+  to their own vault). A device that has a vault refuses an older member list
+  or version from the server.
 
 A `LIMITED_POLICY` in `policies.json` limits shared vaults separately from
-accounts; the limits of the policy a vault was created under apply to it,
-whichever credentials its members use:
+accounts. A vault's limits are those of the policy it was created under, set
+when it's created and kept with it, whichever credentials its members use:
 
-| Field                    | Default         | Meaning                                                          |
-| ------------------------ | --------------- | ---------------------------------------------------------------- |
-| `MaxSharedVaults`        | `0`             | shared vaults that can be created (none if unset)                |
-| `NumSharedVaults`        | `0`             | maintained by the server                                         |
-| `MaxSharedVaultDataSize` | `MaxDataSize`   | bytes per shared vault (older epochs' history is dropped to fit) |
-| `MaxSharedVaultMembers`  | unlimited (256) | members per shared vault                                         |
+| Field                    | Default   | Meaning                                                                        |
+| ------------------------ | --------- | ------------------------------------------------------------------------------ |
+| `MaxSharedVaultsPerUser` | `4`       | shared vaults each user may create (counted until deleted, even if they leave) |
+| `MaxSharedVaults`        | unlimited | shared vaults under the policy in all                                          |
+| `NumSharedVaults`        | `0`       | maintained by the server                                                       |
+| `MaxSharedVaultDataSize` | 16 KiB    | encrypted contents (tables and history) per shared vault                       |
+| `MaxSharedVaultMembers`  | `8`       | members per shared vault                                                       |
+| `MaxSharedVaultRecords`  | `16`      | member list records kept per vault (older ones go, with their history)         |
 
-The server access password and `ROOT_POLICY` have no limits; a `NULL_POLICY`
-(or a removed policy) leaves its shared vaults readable but not changeable.
-Shared vault data lives in `server_data/.shared/`.
+The server access password and `ROOT_POLICY` have no limits but the server's
+own (64 MiB, 256 members, 64 records); a `NULL_POLICY` (or a removed policy)
+leaves its shared vaults readable (and leavable) but not changeable. Shared
+vault data lives in `server_data/.shared/`; identity bundles are kept only
+while they're someone's current identity or named in a record kept.

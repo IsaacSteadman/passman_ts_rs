@@ -1,9 +1,10 @@
-import { initWasm, encryptBlob } from "./passman_crypto_glue";
+import { initWasm } from "./passman_crypto_glue";
 import {
   initLoginArea,
   credentialHeaders,
   deriveUserKeys,
   readServerAccessParams,
+  sealVault,
   type LoginResult,
 } from "./loginArea";
 import { initContentArea } from "./contentArea";
@@ -215,10 +216,11 @@ document.addEventListener("DOMContentLoaded", async () => {
       return;
     }
 
-    const emptyTable = new TextEncoder().encode(
-      JSON.stringify({ tables: [], history: [] }),
+    const { blob } = sealVault(
+      encryptionKey,
+      { tables: [], history: [] },
+      null,
     );
-    const blob = encryptBlob(encryptionKey, emptyTable);
 
     const url = serverUrl("/pass-table");
     url.searchParams.set("username", username);

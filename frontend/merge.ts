@@ -43,8 +43,9 @@ function same(a: unknown, b: unknown): boolean {
   return canonical(a) === canonical(b);
 }
 
+/** Whether two vaults hold the same things (whatever their revisions). */
 export function vaultsEqual(a: VaultRoot, b: VaultRoot): boolean {
-  return same(a, b);
+  return same({ ...a, revision: undefined }, { ...b, revision: undefined });
 }
 
 /** Merges one value; `undefined` means absent on that side. */
@@ -325,7 +326,14 @@ function mergeSharing(
       );
     if (contact.value != null) contacts[name] = structuredClone(contact.value);
   }
-  return { identitySecret: secret.value, contacts };
+  // an acceptance is never taken back (leaving removes the vault instead):
+  // keep the latest of each
+  const accepted: Record<string, number> = { ...remote?.accepted };
+  for (const [id, seq] of Object.entries(local?.accepted ?? {}))
+    accepted[id] = Math.max(accepted[id] ?? seq, seq);
+  const merged: SharingData = { identitySecret: secret.value, contacts };
+  if (Object.keys(accepted).length > 0) merged.accepted = accepted;
+  return merged;
 }
 
 /** Whether two JSON values are equal, whatever the order of object keys. */
@@ -376,6 +384,8 @@ export function mergeVaults(
     conflicts,
   );
   if (sharing != null) merged.sharing = sharing;
+  // the newer server version's; a save counts on from it
+  if (remote.revision != null) merged.revision = remote.revision;
 
   return { merged, conflicts };
 }

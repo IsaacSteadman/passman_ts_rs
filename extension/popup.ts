@@ -11,14 +11,22 @@ import {
   initWasm,
   toBase64Url,
 } from "../frontend/passman_crypto_glue";
+import { isPotentiallyTrustworthy } from "./trustworthy";
 import {
+  RollbackError,
+  checkNotOlder,
   credentialHeaders,
   decodeVault,
   describeError,
   downloadVault,
+  sealVault,
   unlockWithPassword,
 } from "../frontend/loginArea";
-import { setServerOrigin, serverUrl } from "../frontend/serverOrigin";
+import {
+  serverFetch,
+  setServerOrigin,
+  serverUrl,
+} from "../frontend/serverOrigin";
 import type { PassTableData, VaultRoot } from "../frontend/PassTable";
 import { generateOtp, otpSecondsRemaining } from "../frontend/mfa";
 import { passgen } from "../frontend/passgen_util";
@@ -174,7 +182,15 @@ async function refresh(): Promise<void> {
     return;
   }
   if (download.etag !== current.etag) {
-    vault = decodeVault(key(), download.blob);
+    const latest = decodeVault(key(), download.blob);
+    try {
+      checkNotOlder(latest, vault);
+    } catch (e) {
+      if (!(e instanceof RollbackError)) throw e;
+      setStatus(`⚠ Not updated: ${e.message}.`);
+      return;
+    }
+    vault = latest;
     current.vault = toBase64Url(download.blob);
     current.etag = download.etag;
     await saveSession(current);
@@ -217,6 +233,8 @@ async function refreshShared(current: StoredSession): Promise<void> {
   const problems: string[] = [];
   const next: StoredSharedVault[] = [];
   for (const info of infos) {
+    // invitations aren't used until accepted (in the web app)
+    if (sharing.accepted?.[info.id] == null) continue;
     const cached = current.shared.find((s) => s.id === info.id);
     if (cached && cached.etag === info.etag) {
       next.push(cached);
@@ -231,6 +249,8 @@ async function refreshShared(current: StoredSession): Promise<void> {
     }
     try {
       const shared = await SharedVault.download(client, info);
+      // added again since accepting: an invitation once more
+      if (shared.pending) continue;
       next.push({
         id: info.id,
         name: shared.data.name,
@@ -272,7 +292,10 @@ function serverOrigin(text: string): string | null {
     const url = new URL(
       /^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`,
     );
-    return url.protocol === "https:" || url.protocol === "http:"
+    // plain HTTP would send the password's auth key in the clear: only to
+    // this computer (as browsers only trust such pages with their crypto)
+    return url.protocol === "https:" ||
+      (url.protocol === "http:" && isPotentiallyTrustworthy(url.hostname))
       ? url.origin
       : null;
   } catch {
@@ -284,7 +307,9 @@ unlockForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   const origin = serverOrigin(field(unlockForm, "server").value);
   if (origin == null) {
-    setStatus("That isn't a server address.");
+    setStatus(
+      "That isn't a server address. (It must use https://, except for this computer.)",
+    );
     return;
   }
   const submit = unlockForm.querySelector("button")!;
@@ -623,8 +648,7 @@ async function saveVault(change: (data: VaultRoot) => string): Promise<string> {
     if (current == null || vault == null) return "Locked.";
     const data = structuredClone(vault);
     const done = change(data);
-    const json = JSON.stringify(data);
-    const blob = encryptBlob(key(), new TextEncoder().encode(json));
+    const { blob, saved } = sealVault(key(), data, vault);
     const url = serverUrl("/pass-table");
     url.searchParams.set("username", current.username);
     if (current.serverNs != null)
@@ -636,7 +660,7 @@ async function saveVault(change: (data: VaultRoot) => string): Promise<string> {
     if (current.etag != null) headers["If-Match"] = current.etag;
     let response: Response;
     try {
-      response = await fetch(url, { method: "PUT", headers, body: blob });
+      response = await serverFetch(url, { method: "PUT", headers, body: blob });
     } catch {
       return "Can't reach the server, so nothing was saved.";
     }
@@ -649,7 +673,14 @@ async function saveVault(change: (data: VaultRoot) => string): Promise<string> {
         current.authKeyB64,
       );
       if (!latest.ok) return `Couldn't save ${latest.message}`;
-      vault = decodeVault(key(), latest.blob);
+      const decoded = decodeVault(key(), latest.blob);
+      try {
+        checkNotOlder(decoded, vault);
+      } catch (e) {
+        if (e instanceof RollbackError) return `Not saved: ${e.message}.`;
+        throw e;
+      }
+      vault = decoded;
       current.vault = toBase64Url(latest.blob);
       current.etag = latest.etag;
       continue;
@@ -664,7 +695,7 @@ async function saveVault(change: (data: VaultRoot) => string): Promise<string> {
       }
       return `Couldn't save ${error.message}`;
     }
-    vault = data;
+    vault = saved;
     current.vault = toBase64Url(blob);
     current.etag = response.headers.get("ETag");
     await saveSession(current);
